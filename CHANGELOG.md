@@ -4,6 +4,13 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-10-11T09:11:48+05:30 — Add reusable Orbit project-memory skill
+
+- Changed: Added `.agents/skills/orbit/SKILL.md`, guidance in `AGENTS.md`, and README setup, invocation, and troubleshooting instructions.
+- Why: Give Codex a reusable workflow for safe project-scoped retrieval and explicitly approved saves through the existing Orbit MCP tools.
+- Validation: `python C:\Users\asus\.codex\skills\.system\skill-creator\scripts\quick_validate.py .agents\skills\orbit` — valid; `python -m pytest -p no:cacheprovider -o addopts=''` — 112 passed; `git diff --check` — clean.
+- Limitations: No canonical project identifier is documented yet. Codex's configured `orbit` entry has no explicit project/action allowlist, so project operations may remain denied until its local configuration is set.
+
 ## 2026-10-11T05:18:21+05:30 — Validate end-to-end MCP memory workflow
 
 - Changed: Added a two-process stdio MCP integration test using a disposable SQLite database; fixed FastMCP error wrapping so `SOURCE_MESSAGE_NOT_FOUND` keeps its stable category over the protocol.

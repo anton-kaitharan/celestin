@@ -82,3 +82,26 @@ This project was built from the DevDay Exchange Community: Kochi template. Event
 
 - Event: 10–11 October 2026 at JAIN University, Kochi.
 - [Event and registration on Luma](https://luma.com/z10nz8gp)
+
+## Codex skill: Orbit project memory
+
+The repository skill at `.agents/skills/orbit/SKILL.md` helps Codex retrieve saved project context and save explicitly approved messages or decisions with the Orbit MCP tools. In Codex, invoke it with `$orbit`, add a topic with `$orbit database migration`, or request the save workflow with `$orbit save`. A skill does not register a custom `/orbit` slash command. If the skill is not listed, pull the repository and restart Codex so it discovers `.agents/skills/`.
+
+This repository does not yet designate a canonical Orbit project identifier. The skill will ask until the team documents one in this repository; do not use `demo` or `orbit-demo-2026` as an assumed project.
+
+### Configure Orbit for a repository
+
+Choose one stable project identifier and document it in the repository's `AGENTS.md` or README. Each local MCP server process needs an explicit grant for that exact identifier. For Codex CLI, first inspect the existing entry with `codex mcp get orbit`; do not add a duplicate. When registering Orbit in a new Codex configuration, provide the database path and local project/action allowlist:
+
+```powershell
+codex mcp add orbit `
+  --env "MEMORY_BRIDGE_DB_PATH=C:\path\to\memory_bridge.db" `
+  --env 'ORBIT_LOCAL_PROJECT_ACCESS={"project-key":["read","write"]}' `
+  -- orbit
+```
+
+Replace `project-key` and the database path with the team's chosen values. On this PC, use the same absolute database path for the tunnel-launched server and Codex only when both are intended to share that local database. A matching path on another computer does not share the file. This allowlist is process-level access control, not per-user authentication.
+
+### Teammate setup and troubleshooting
+
+Teammates get the skill by pulling the repository; no separate skill installer is needed for this repo-local skill. They must configure their own Codex MCP entry with the agreed project grant and database path. Check `codex mcp list` and `codex mcp get orbit` if Orbit tools are unavailable. If a call returns `ACCESS_DENIED`, confirm that the exact project identifier and requested `read` or `write` action are granted in the process environment; do not retry using another project. `$orbit` retrieval is read-only. `$orbit save` ingests a source message and creates a decision draft; it does not approve the database decision status.
