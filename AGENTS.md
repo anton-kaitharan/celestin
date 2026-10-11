@@ -16,6 +16,12 @@
 - Validate inputs, handle errors explicitly, and show useful failure messages. Do not hide failures behind fabricated success or demo data.
 - Keep changes focused. Explain the reason for non-obvious decisions in short comments or project documentation.
 
+## Orbit project memory
+
+- For substantial research, design, or implementation, use the `$orbit` skill when this repository has an explicitly documented Orbit project identifier. Skip retrieval for trivial tasks.
+- If the identifier is missing or ambiguous, ask the user. Never infer it from the repository name or use a demo project by default.
+- Follow the skill's approval and source-ID requirements before saving context.
+
 ## Document every meaningful change
 
 - Update [CHANGELOG.md](CHANGELOG.md) in the same commit as each meaningful change. Record the date and time with timezone, what changed, why, the affected files or feature, validation performed, and known limitations.
