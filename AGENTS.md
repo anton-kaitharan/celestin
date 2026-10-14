@@ -40,6 +40,14 @@
 7. Do not create empty commits to satisfy the clock. Do not backdate commits, squash away the event development record, force-push, or rewrite shared history.
 8. Push committed checkpoints to the team's repository regularly, when network access is available and the team has authorized that remote. Resolve conflicts with care.
 
+## Optional granular commit watcher
+
+- `.codex/agents/commit-granular.toml` defines the repository-local `commit_granular` agent. It may create separate, coherent local commits for independent completed changes; it must never push or rewrite history.
+- Start the foreground watcher with `pwsh -NoProfile -File scripts/commit-watcher.ps1`. It requires a clean tree and a checked-out branch at startup, waits 90 quiet seconds (polling every 3 seconds), then asks Codex CLI to review and commit the snapshot. Use `-QuietPeriodSeconds` and `-PollIntervalSeconds` to configure timing.
+- Stop with Ctrl+C. For scripted graceful shutdown, pass `-StopFilePath <path>` and create that file. The watcher stops on branch changes, Git operation markers, a CLI error, or changes left uncommitted after a successful CLI run; review and restart manually.
+- The watcher does not run network or remote Git commands. It uses Codex CLI `exec` with the `workspace-write` sandbox and enables custom agents for that invocation. The watcher only runs while its terminal process is active.
+- Check the watcher using `pwsh -NoProfile -File scripts/test-commit-watcher.ps1`. `scripts/test-commit-agent.ps1` exercises the actual Codex agent in a disposable repository when the local CLI helper environment is available.
+
 The 30-minute target is this repository's working convention. It does not replace event rules or organizer instructions.
 
 ## Check work and protect credentials
