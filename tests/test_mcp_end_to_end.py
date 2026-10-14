@@ -41,6 +41,10 @@ class EndToEndStdioIntegrationTests(unittest.TestCase):
 
             env = os.environ.copy()
             env["MEMORY_BRIDGE_DB_PATH"] = str(database_path)
+            env["ORBIT_LOCAL_PROJECT_ACCESS"] = json.dumps({
+                "orbit-e2e-alpha": ["read", "write"],
+                "orbit-e2e-beta": ["read", "write"],
+            })
 
             @asynccontextmanager
             async def connected_session():

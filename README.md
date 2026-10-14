@@ -17,13 +17,23 @@ python -m pip install -e .
 Run the server over stdio:
 
 ```powershell
+$env:ORBIT_LOCAL_PROJECT_ACCESS='{"demo":["read","write"]}'
 orbit
 ```
+
+Project tools fail closed unless the server operator explicitly configures
+`ORBIT_LOCAL_PROJECT_ACCESS` as a JSON object mapping each permitted project to
+`read`, `write`, or both. Omit an action to deny it. For example,
+`{"demo":["read"]}` allows reads for `demo` and denies writes. This is a
+launch-scoped local policy, not caller authentication: stdio does not identify
+individual MCP clients, so any process able to connect to this server inherits
+the configured project permissions. Do not treat the tool's `project` argument
+as authorization, and do not use this policy to expose the server remotely.
 
 For Codex CLI, register the local stdio server from the repository environment:
 
 ```powershell
-codex mcp add orbit --env 'MEMORY_BRIDGE_DB_PATH=C:\path\to\memory_bridge.db' -- orbit
+codex mcp add orbit --env 'MEMORY_BRIDGE_DB_PATH=C:\path\to\memory_bridge.db' --env 'ORBIT_LOCAL_PROJECT_ACCESS={"demo":["read","write"]}' -- orbit
 codex mcp list
 ```
 

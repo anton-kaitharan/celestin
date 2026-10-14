@@ -11,6 +11,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from orbit.database.engine import connect
 from orbit.mcp_server import server
+from orbit.mcp_server.authorization import ProjectAccessPolicy
 from orbit.mcp_server.persistence_services import PersistenceServices
 from orbit.repositories import DecisionRepository
 
@@ -20,7 +21,10 @@ class MCPRepositoryIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "memory.db"
             first_adapter = PersistenceServices(db_path)
-            with patch.object(server, "persistence_services", first_adapter):
+            with patch.object(server, "_persistence_backend", first_adapter), patch.object(
+                server, "project_authorizer",
+                ProjectAccessPolicy(local_access={"project-a": ["read", "write"]}),
+            ):
                 message = server.ingest_chat_message(
                     "project-a", "conversation-1", "user", "Synthetic test message"
                 )
@@ -57,7 +61,10 @@ class MCPRepositoryIntegrationTests(unittest.TestCase):
             message = adapter.ingest_chat_message(
                 "project-a", "conversation-1", "user", "Private synthetic text"
             )
-            with patch.object(server, "persistence_services", adapter):
+            with patch.object(server, "_persistence_backend", adapter), patch.object(
+                server, "project_authorizer",
+                ProjectAccessPolicy(local_access={"project-a": ["write"], "project-b": ["write"]}),
+            ):
                 with self.assertRaises(ToolError) as raised:
                     server.save_decision(
                         "project-b", "test-policy", "must not be stored",
@@ -75,7 +82,10 @@ class MCPRepositoryIntegrationTests(unittest.TestCase):
             database_directory = Path(temp_dir) / "is-a-directory"
             database_directory.mkdir()
             adapter = PersistenceServices(database_directory)
-            with patch.object(server, "persistence_services", adapter):
+            with patch.object(server, "_persistence_backend", adapter), patch.object(
+                server, "project_authorizer",
+                ProjectAccessPolicy(local_access={"project-a": ["write"]}),
+            ):
                 with self.assertRaises(ToolError) as raised:
                     server.ingest_chat_message("project-a", "conv", "user", "synthetic")
 

@@ -1,59 +1,70 @@
-# Orbit remote MCP authorization design proposal
+# Orbit project authorization design
 
-**Status:** Design proposal only. It does not enable authentication, HTTP transport, a tunnel, or remote access. The existing local stdio workflow and its client configuration remain unchanged.
+**Status:** Local stdio authorization is implemented as an explicit, fail-closed server-process project/action allowlist. Stdio still does not authenticate individual clients. Principal-based authorization and all remote authentication/transport controls below remain a future design; no HTTP transport, tunnel, or remote access is enabled.
+
+## Trust boundaries and threat model
+
+| Boundary | Trusted inputs | Enforced control | Security limit |
+|---|---|---|---|
+| Local stdio process | The operator-controlled server launch environment and installed Orbit code | `ORBIT_LOCAL_PROJECT_ACCESS` grants only named projects and `read`/`write` actions; absence of policy denies project tools | Stdio provides no authenticated identity for each MCP client. Any client that can connect inherits the process allowlist. This does not protect against an untrusted process running as the same local user or one able to alter the launch environment/configuration. |
+| MCP request | Tool arguments are untrusted, including `project` and `source_message_id` | Server-facing persistence/retrieval adapters authorize before invoking a backend; repositories and retrieval continue applying project predicates | A project name selects a namespace but never grants access. Source IDs must resolve inside that same project. |
+| Future remote transport | Only a transport-verified principal produced by a reviewed authenticator | Principal-to-project/action policy must deny by default before tool dispatch and be repeated at the server service boundary | No remote authenticator, membership provider, token verifier, or transport is implemented. Tunnel reachability alone is not identity or authorization. |
+
+The current local policy is a coarse capability for one server process, not user authentication. Do not connect a multi-user or remote client to a process whose allowlist is broader than every connected client should access.
 
 ## Current enforcement point and gap
 
-The MCP handlers in `src/orbit/mcp_server/server.py` validate the `project` string and pass it to the persistence or retrieval adapter:
+The four MCP handlers in `src/orbit/mcp_server/server.py` validate the `project` string and call server-facing persistence/retrieval wrappers:
 
 - `ingest_chat_message` and `save_decision` perform project-scoped writes.
 - `search_chat_history` and `retrieve_context` perform project-scoped reads.
 - `save_decision` resolves `source_message_id` within the requested project and treats cross-project sources as not found.
 
-These checks isolate records relative to the requested project, but there is no authenticated principal and no mapping from a principal to permitted projects. Today, any caller that can invoke the tools can supply another project name. On a remote transport, this would permit cross-project access. A project parameter must remain a resource selector only; it must never be treated as proof of authorization.
+The wrappers authorize each requested project/action before calling the underlying adapters. The local policy is read from `ORBIT_LOCAL_PROJECT_ACCESS` and defaults to deny all project operations. There is still no authenticated principal or per-client membership mapping in stdio; any process able to connect to the same server receives the same configured grants. A project parameter remains a resource selector only, never proof of authorization.
 
-The authorization boundary belongs in the MCP server layer, after transport authentication and before any persistence or retrieval adapter is called. The server must authorize every tool call. Data and retrieval layers should continue to enforce the supplied project predicate and may repeat policy checks if the owning members agree, but the MCP layer must not duplicate SQL or retrieval logic.
+The authorization boundary belongs in server-facing service wrappers, after transport authentication (if any) and before any persistence or retrieval adapter is called. This protects normal tool dispatch and direct use of the adapters exported by the server module. Data and retrieval layers continue to enforce project predicates; no SQL or ranking logic is duplicated.
 
 ## Proposed interface
 
-Introduce an injectable authorization dependency owned by the MCP server layer. The names below are proposals, not committed public interfaces:
+The authorization dependency is implemented in `src/orbit/mcp_server/authorization.py`:
 
 ```python
 class ProjectAuthorizer(Protocol):
     def authorize(
         self,
-        principal: AuthenticatedPrincipal,
+        principal: AuthenticatedPrincipal | None,
         project: str,
         action: ProjectAction,
     ) -> AuthorizedProject: ...
 ```
 
-Conceptual values:
+Current and future policy behavior:
 
-- `AuthenticatedPrincipal`: server-verified issuer and stable subject identifier, plus tenant/workspace identity and granted scopes. Constructed only from validated credentials; never from MCP tool arguments.
-- `ProjectAction`: at minimum `read` and `write`. Map `search_chat_history` and `retrieve_context` to `read`; map `ingest_chat_message` and `save_decision` to `write`.
-- `AuthorizedProject`: a server-issued scope containing the canonical project identifier and principal, returned only after policy approval. Handlers pass this authorized scope or its canonical project identifier to service adapters.
+- `AuthenticatedPrincipal`: server-verified issuer and stable subject identifier. It is constructed only by a future reviewed authenticator; never from MCP tool arguments. Current stdio supplies `None`; it does not invent a client identity.
+- `ProjectAction`: `read` or `write`. Map `search_chat_history` and `retrieve_context` to `read`; map `ingest_chat_message` and `save_decision` to `write`.
+- `AuthorizedProject`: a server-issued scope containing the project and action, returned only after policy approval. Server-facing wrappers pass its project to service adapters.
 - `ProjectAccessDenied`: a typed authorization failure converted by the MCP boundary into a stable, non-sensitive error. Do not reveal whether an inaccessible project exists.
+- `ProjectAccessPolicy`: the current implementation. With `principal=None`, it checks the process-level allowlist. With a non-null principal, it checks exact configured principal/project/action grants; unknown identities are denied. The remote identity source and production membership mapping are not configured.
 
-The identity provider or verifier must validate signature, issuer, audience/resource, expiry, and required scopes. Authorization must use a server-side project membership source, such as an approved identity provider group mapping or project access registry. Missing, unavailable, or ambiguous membership data must fail closed. An arbitrary bearer string, shared hard-coded token, caller-supplied subject, or project-name allowlist supplied with the request is not acceptable authentication or authorization.
+The future identity provider or verifier must validate signature, issuer, audience/resource, expiry, and required scopes. Authorization must use a server-side project membership source, such as an approved identity provider group mapping or project access registry. Missing, unavailable, or ambiguous membership data must fail closed. An arbitrary bearer string, shared hard-coded token, caller-supplied subject, or project-name allowlist supplied with the request is not acceptable authentication or authorization. The local environment allowlist is strictly process configuration, not an authentication mechanism.
 
 No membership table or project registry currently exists in the inspected database schema. Selecting and owning the membership source is a team decision. This proposal does not prescribe changes to Member 1's schema or repositories.
 
 ## Access model
 
-1. **Authenticate each remote request.** Validate the remote client's OAuth access token or other team-approved standards-based credential before tool dispatch. Authentication failure prevents all tool execution.
+1. **Authenticate each remote request.** Validate the remote client's OAuth access token or other team-approved standards-based credential before tool dispatch. Authentication failure prevents all tool execution. For local stdio, permissions are granted to the server process and are not per-client identity checks.
 2. **Authorize each operation.** Check the authenticated subject's membership for the requested project and action. Do not infer permission from tool selection, ChatGPT workspace membership, a tunnel ID, or the project argument.
 3. **Deny by default.** No membership, unknown principal, unknown project, missing scope, expired credential, or policy service failure denies access.
 4. **Use least privilege.** Read and write permissions are separate. A read-only client may search and retrieve but cannot ingest messages or save decisions. If project-specific roles are adopted, server-side policy maps them to actions.
 5. **Preserve data-layer scoping.** Continue passing the authorized canonical project to repository and retrieval services. Source-message references must resolve within that same project. Do not trust result payloads without confirming their project matches the authorized scope.
 6. **Avoid project-existence disclosure.** Return the same safe denial for an inaccessible project whether it exists or not. For a source message that is absent or belongs to another project, preserve the contract's `SOURCE_MESSAGE_NOT_FOUND` behavior.
-7. **Keep stdio unchanged.** Existing local client setup remains the stdio entry point. Remote auth configuration must be isolated to a future remote adapter/transport and must not introduce a development bypass that can be reached remotely.
+7. **Keep the stdio transport.** The local entry point remains stdio; the new process-level project allowlist is required for project tools. Remote auth configuration must be isolated to a future remote adapter/transport and must not introduce a development bypass that can be reached remotely.
 
-The public error contract currently does not define an authorization error. Before implementation, agree whether the MCP layer should expose `ACCESS_DENIED`, use a generic `PROJECT_NOT_FOUND` response for inaccessible resources, or use an equivalent standardized MCP authorization error. Transport-level authentication failures should use the selected protocol's normal unauthorized response. In all cases, do not send token claims, identity-provider errors, or membership details to the client.
+The public tool contract now defines `ACCESS_DENIED` for project/action denials. Before remote implementation, the team must decide how transport-level authentication failures use the selected protocol's normal unauthorized response. Do not send token claims, identity-provider errors, or membership details to the client.
 
 ## Write-operation safeguards
 
-- `ingest_chat_message` and `save_decision` require a valid identity and explicit project write permission on every invocation.
+- For current stdio, `ingest_chat_message` and `save_decision` require an explicit process-level project write grant. A future remote transport must additionally require a validated identity with project write permission on every invocation.
 - A denied write must fail before calling persistence; tests must verify no row or FTS entry is written.
 - `save_decision` continues to create a `draft`; remote access must not imply approval. Approval remains a distinct action outside the current four-tool contract.
 - Client-side confirmation prompts or tool annotations may improve user awareness, but they do not replace server authorization. Decide whether both write tools require an additional explicit confirmation in the selected client.
@@ -61,6 +72,16 @@ The public error contract currently does not define an authorization error. Befo
 - Do not add retry behavior for writes until idempotency semantics are defined; a timeout must not silently duplicate a user operation.
 
 ## Configuration required before remote implementation
+
+### Current local stdio policy
+
+Set `ORBIT_LOCAL_PROJECT_ACCESS` in the server process environment to a JSON object whose keys are exact project names and whose values are arrays containing `read`, `write`, or both. Example:
+
+```json
+{"research":["read"],"orbit":["read","write"]}
+```
+
+Unset or empty configuration denies all four project tools. Malformed JSON or unsupported actions stop server initialization instead of widening access. Configure the variable in the local MCP server entry so the client cannot select a broader grant in tool arguments. This policy authorizes the server process, not the individual stdio client.
 
 The exact variable names are to be set after selecting the identity provider and architecture. Configuration must include:
 
@@ -74,6 +95,8 @@ The exact variable names are to be set after selecting the identity provider and
 Do not bind the current server to an unauthenticated network address. Tunnel access alone does not satisfy the application authorization requirements above.
 
 ## Required test plan
+
+The implemented local test suite covers explicit allowlist grants, default denial, unknown principal denial at the policy interface, read/write action separation, altered project arguments, direct server-adapter calls, and cross-project source references. This verifies process-level scoping only; it does not verify an authenticated user because stdio supplies no trustworthy per-client principal.
 
 Implement these as transport/auth integration tests using isolated test databases and test identities; do not use real conversation data.
 
@@ -110,10 +133,10 @@ Implement these as transport/auth integration tests using isolated test database
 
 ### Member 3 — MCP server and integration
 
-- Select the identity token verifier and project authorization dependency contract; define principal fields, read/write scopes, and failure codes.
+- Select and own the identity token verifier and project membership source that will provide principals and grants to the implemented authorization dependency; define issuer/audience, read/write scopes, revocation, and remote authentication failure behavior.
 - Decide where transport authentication terminates and ensure remote requests cannot bypass it. Keep the stdio client path unchanged.
 - Decide whether `ingest_chat_message` and `save_decision` need client confirmation/annotations in addition to server-side write authorization.
-- Approve the safe error mapping and audit fields, and add the authorization integration tests before enabling remote transport.
+- Approve remote audit fields and any additional authentication error mapping before enabling remote transport. Local `ACCESS_DENIED` handling and its tests are implemented.
 
 ### Shared/team decisions
 

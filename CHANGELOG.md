@@ -11,6 +11,13 @@ Record each meaningful project change during the event, newest first. Update thi
 - Validation: `python C:\Users\asus\.codex\skills\.system\skill-creator\scripts\quick_validate.py .agents\skills\orbit` — valid; `python -m pytest -p no:cacheprovider -o addopts=''` — 112 passed; `git diff --check` — clean.
 - Limitations: No canonical project identifier is documented yet. Codex's configured `orbit` entry has no explicit project/action allowlist, so project operations may remain denied until its local configuration is set.
 
+## 2026-10-11T05:27:52+05:30 — Add fail-closed local project authorization
+
+- Changed: Added an authorization policy interface with principal/project/action grants, an explicit local stdio project/action allowlist, guarded server-facing persistence and retrieval adapters, authorization tests, and setup/threat-model documentation.
+- Why: Prevent project-name arguments from granting access and deny project operations unless the server operator configured the requested project and action.
+- Validation: `python -m pytest -p no:cacheprovider -o addopts=''` — 112 passed; `git diff --check` — clean.
+- Limitations: Stdio does not authenticate individual clients. All clients connected to one process inherit its configured grants; this does not protect against untrusted local processes. No remote authentication or deployment was added.
+
 ## 2026-10-11T05:18:21+05:30 — Validate end-to-end MCP memory workflow
 
 - Changed: Added a two-process stdio MCP integration test using a disposable SQLite database; fixed FastMCP error wrapping so `SOURCE_MESSAGE_NOT_FOUND` keeps its stable category over the protocol.

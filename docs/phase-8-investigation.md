@@ -45,3 +45,7 @@ No private conversation data was sent to a remote assistant during this investig
 - User identity provider, project membership source, and authorization policy: **not approved**.
 - Permission to return private project memory to ChatGPT: **not approved**.
 - Remote implementation or deployment: **not started**.
+
+## Follow-up: local authorization implementation
+
+The later local authorization work adds a fail-closed `ORBIT_LOCAL_PROJECT_ACCESS` project/action allowlist and guards all four server-facing tool adapters. This narrows which project namespaces a configured stdio server process can access, but it does not authenticate individual MCP clients. A client connected to the process inherits its grants. The phase 8 remote blockers remain: no reviewed identity provider, principal-to-project membership source, remote transport/authentication, tunnel approval, or approval to send private project memory to a remote assistant. See [authorization-design.md](authorization-design.md) for the implemented local policy and threat model.

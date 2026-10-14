@@ -15,6 +15,12 @@ from orbit.database.engine import DatabaseError, ROLE_VALUES
 from orbit.repositories._validation import NotFoundError, ValidationError
 from orbit.retrieval import SearchIndexUnavailable
 
+from .authorization import (
+    READ,
+    WRITE,
+    ProjectAccessDenied,
+    ProjectAccessPolicy,
+)
 from .persistence_services import PersistenceServices, SourceMessageNotFoundError
 from .retrieval_services import RetrievalServices
 
@@ -48,7 +54,7 @@ class _SafeToolManager(ToolManager):
                 code = None
             if code in {
                 "INVALID_ARGUMENT", "SOURCE_MESSAGE_NOT_FOUND", "RETRIEVAL_UNAVAILABLE",
-                "STORAGE_ERROR", "INTERNAL_ERROR",
+                "STORAGE_ERROR", "INTERNAL_ERROR", "ACCESS_DENIED",
             }:
                 raise
             _log_failure("tool_arguments", exc)
@@ -72,10 +78,59 @@ MAX_SOURCE_MESSAGE_ID_LENGTH = 64
 MAX_QUERY_LENGTH = 4_096
 MAX_TOKEN_BUDGET = 20_000
 
-# Replaceable adapter instance: tests can inject a temporary database while
-# public tool names and arguments remain stable.
-persistence_services = PersistenceServices()
-retrieval_services = RetrievalServices()
+# Stdio has no trustworthy per-client identity. The current principal remains
+# None and access is limited by the operator-configured local project policy.
+# Remote transports must install a real principal provider and policy before
+# they can be enabled.
+def _stdio_principal():
+    return None
+
+
+project_authorizer = ProjectAccessPolicy.from_environment()
+_persistence_backend = PersistenceServices()
+_retrieval_backend = RetrievalServices()
+
+
+def _authorize_project(project: str, action: str):
+    try:
+        return project_authorizer.authorize(_stdio_principal(), project, action)
+    except ProjectAccessDenied:
+        logger.warning("MCP project authorization denied (%s)", action)
+        raise _error("ACCESS_DENIED", "Access to this project is not permitted.") from None
+
+
+class _AuthorizedPersistenceServices:
+    """Server-facing persistence adapter that guards even direct adapter calls."""
+
+    def ingest_chat_message(self, project: str, conversation_id: str, role: str, content: str):
+        scope = _authorize_project(project, WRITE)
+        return _persistence_backend.ingest_chat_message(
+            scope.project, conversation_id, role, content
+        )
+
+    def save_decision(self, project: str, key: str, value: str, source_message_id: str):
+        scope = _authorize_project(project, WRITE)
+        return _persistence_backend.save_decision(
+            scope.project, key, value, source_message_id
+        )
+
+
+class _AuthorizedRetrievalServices:
+    """Server-facing retrieval adapter that guards all project reads."""
+
+    def search_chat_history(self, project: str, query: str, limit: int):
+        scope = _authorize_project(project, READ)
+        return _retrieval_backend.search_chat_history(scope.project, query, limit)
+
+    def retrieve_context(self, project: str, query: str, token_budget: int):
+        scope = _authorize_project(project, READ)
+        return _retrieval_backend.retrieve_context(scope.project, query, token_budget)
+
+
+# Keep the server-facing service names injectable while ensuring every call
+# through this module goes through the policy wrapper before touching a backend.
+persistence_services = _AuthorizedPersistenceServices()
+retrieval_services = _AuthorizedRetrievalServices()
 
 
 def _error(code: str, message: str) -> ToolError:
@@ -105,6 +160,8 @@ def _log_failure(tool_name: str, exc: Exception) -> None:
 def _retrieval_call(tool_name: str, callback, failure_message: str):
     try:
         return callback()
+    except ToolError:
+        raise
     except SearchIndexUnavailable as exc:
         _log_failure(tool_name, exc)
         raise _error("RETRIEVAL_UNAVAILABLE", "The search index is unavailable.") from exc
@@ -128,6 +185,8 @@ def ingest_chat_message(project: str, conversation_id: str, role: str, content: 
     content = _required_string("content", content, MAX_MESSAGE_CONTENT_LENGTH)
     try:
         return persistence_services.ingest_chat_message(project, conversation_id, role, content)
+    except ToolError:
+        raise
     except ValidationError as exc:
         _log_failure("ingest_chat_message", exc)
         raise _error("INVALID_ARGUMENT", "One or more message fields are invalid.") from exc
@@ -148,6 +207,8 @@ def save_decision(project: str, key: str, value: str, source_message_id: str) ->
     source_message_id = _required_string("source_message_id", source_message_id, MAX_SOURCE_MESSAGE_ID_LENGTH)
     try:
         return persistence_services.save_decision(project, key, value, source_message_id)
+    except ToolError:
+        raise
     except ValidationError as exc:
         _log_failure("save_decision", exc)
         raise _error("INVALID_ARGUMENT", "One or more decision fields are invalid.") from exc
