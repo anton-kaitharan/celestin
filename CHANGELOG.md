@@ -11,6 +11,13 @@ Record each meaningful project change during the event, newest first. Update thi
 - Validation: `python C:\Users\asus\.codex\skills\.system\skill-creator\scripts\quick_validate.py .agents\skills\orbit` — valid; `python -m pytest -p no:cacheprovider -o addopts=''` — 112 passed; `git diff --check` — clean.
 - Limitations: No canonical project identifier is documented yet. Codex's configured `orbit` entry has no explicit project/action allowlist, so project operations may remain denied until its local configuration is set.
 
+## 2026-10-11T09:06:01+05:30 — Align README with the implemented project
+
+- Changed: Rewrote `README.md` with cross-platform installation, database configuration, Codex CLI setup, MCP tool examples, and current behavior and limitations.
+- Why: The previous setup was Windows-only and omitted important implementation details for running and demonstrating Orbit.
+- Validation: Compared instructions against `pyproject.toml`, the SQLite engine, MCP server, and retrieval documentation; checked Markdown links and `git diff --check`.
+- Limitations: No application UI or hosted demo is implemented; the demo uses a connected local MCP client.
+
 ## 2026-10-11T05:27:52+05:30 — Add fail-closed local project authorization
 
 - Changed: Added an authorization policy interface with principal/project/action grants, an explicit local stdio project/action allowlist, guarded server-facing persistence and retrieval adapters, authorization tests, and setup/threat-model documentation.
