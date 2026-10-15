@@ -4,6 +4,13 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-10-15T21:52:27+05:30 — Close tracked PostgreSQL cursors in live-test cleanup
+
+- Changed: `TrackedConnection.close()` now closes tracked open cursors, continues attempting remaining cursors if one close fails, and closes the underlying connection in a `finally` block. Added non-live coverage for idempotent closure and cleanup-error handling.
+- Why: Live integration assertions intentionally verify both connection and cursor cleanup; Psycopg connection closure alone does not satisfy the tracked cursor checks.
+- Validation: `tests/postgres/test_live_support.py` — 47 passed; complete `tests/postgres` suite — 78 passed, 18 skipped; `git diff --check` passed. No PostgreSQL connection or live test was run.
+- Limitations: Scripted tests verify the tracking helper’s behavior; this change does not independently establish live Psycopg/PostgreSQL behavior.
+
 ## 2026-10-15T17:24:52+05:30 — Prepare safe PostgreSQL live-test preflight
 
 - Changed: Added read-only SQL checks for database identity, prohibited role attributes and memberships, migration-ledger absence, and unexpected objects to `docs/postgres-integration-tests.md`; clarified the exact acceptance conditions before an opted-in live run.

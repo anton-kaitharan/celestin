@@ -224,7 +224,20 @@ class TrackedConnection:
         return self.raw.transaction()
 
     def close(self) -> None:
-        self.raw.close()
+        cursor_error: Exception | None = None
+        try:
+            for cursor in self.cursors:
+                try:
+                    if not cursor.closed:
+                        cursor.close()
+                except Exception as exc:
+                    if cursor_error is None:
+                        cursor_error = exc
+        finally:
+            if not self.closed:
+                self.raw.close()
+        if cursor_error is not None:
+            raise cursor_error
 
     @property
     def closed(self) -> bool:
