@@ -4,6 +4,13 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-10-15T22:06:50+05:30 — Block previously used PostgreSQL test targets
+
+- Changed: The live-test target parser now rejects the two previously used disposable database names in addition to the older failed target. The PostgreSQL integration guide lists all three retired targets and says not to reuse them.
+- Why: Those prior names otherwise satisfy the nonce format and could be accidentally selected for another migration run.
+- Validation: PostgreSQL non-live subset: 80 passed; full suite with `--import-mode=importlib` reported 464 passed, 38 skipped, and one Windows symlink test failure (`WinError 1314`); rerun excluding that environment-dependent test: 466 passed, 38 skipped, 1 deselected. `git diff --check` passed. No live PostgreSQL connection or test was run.
+- Limitations: Real PostgreSQL authorization and cursor cleanup remain unverified. A fresh, owner-approved database and role are still required.
+
 ## 2026-10-15T21:55:54+05:30 — Reuse project keys across workspace fixtures
 
 - Changed: Updated the live authorization fixture so projects in separate workspaces share the same `legacy_project_key`, while another project in the first workspace keeps a distinct key.

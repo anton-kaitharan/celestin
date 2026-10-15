@@ -74,10 +74,15 @@ celestin_it_20261014_a1b2c3d4
 celestin_it_user_a1b2c3d4
 ```
 
-The previously attempted database `celestin_it_20261014_a7f3c9` is explicitly
-rejected by the harness and must not be reused: its failed initialization may
-have left a migration ledger. Provision a new nonce-named database and matching
-role for every initialization run.
+The following targets are retired and explicitly rejected by the harness; do
+not reuse them:
+
+- `celestin_it_20261014_a7f3c9` — failed initialization may have left a migration ledger.
+- `celestin_it_20261015_b364bbae` — used by a previous live test run.
+- `celestin_it_20261015_10ac5ae9` — used by a previous live test run.
+
+Provision a new nonce-named database and matching role for every initialization
+run.
 
 The role needs permission to create the Celestin tables and indexes in the
 database's `public` schema. It must not have `SUPERUSER`, `CREATEROLE`,
@@ -131,7 +136,7 @@ them.
 
 Only after the database owner has provisioned and approved the new disposable
 database and matching role, connect with the interactive `psql -W` command
-above. Do not use the previously failed `celestin_it_20261014_a7f3c9` target.
+above. Do not use any retired target listed above or `celestin_schema_test_v2`.
 Run these read-only queries in that `psql` session before opting into pytest:
 
 ```sql

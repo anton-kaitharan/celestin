@@ -58,6 +58,28 @@ def test_rejects_the_previously_failed_target_even_with_matching_coordinates():
 
 
 @pytest.mark.parametrize(
+    "database",
+    [
+        "celestin_it_20261015_b364bbae",
+        "celestin_it_20261015_10ac5ae9",
+    ],
+)
+def test_rejects_previously_used_targets_even_with_matching_coordinates(database):
+    nonce = database.rsplit("_", 1)[-1]
+    user = f"celestin_it_user_{nonce}"
+    values = target_environment(
+        CELESTIN_TEST_POSTGRES_DSN=(
+            f"host=127.0.0.1 port=5432 dbname={database} user={user}"
+        ),
+        CELESTIN_TEST_POSTGRES_DATABASE=database,
+        CELESTIN_TEST_POSTGRES_USER=user,
+    )
+
+    with pytest.raises(UnsafePostgresTestTarget, match="test database"):
+        postgres_target_from_environment(values)
+
+
+@pytest.mark.parametrize(
     "changes, message",
     [
         ({"CELESTIN_TEST_POSTGRES_DATABASE": "celestin_schema_test_v2"}, "test database"),

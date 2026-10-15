@@ -15,6 +15,14 @@ class UnsafePostgresTestTarget(ValueError):
 
 _DATABASE_NAME = re.compile(r"^celestin_it_[0-9]{8}_[a-f0-9]{8}$")
 _ROLE_NAME = re.compile(r"^celestin_it_user_[a-f0-9]{8}$")
+_UNUSABLE_TEST_DATABASES = frozenset(
+    {
+        "celestin_schema_test_v2",
+        "celestin_it_20261014_a7f3c9",
+        "celestin_it_20261015_b364bbae",
+        "celestin_it_20261015_10ac5ae9",
+    }
+)
 _DSN_KEY = re.compile(r"^[a-z][a-z0-9_]*$")
 _DSN_VALUE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 _ALLOWED_DSN_KEYS = frozenset({"host", "port", "dbname", "user"})
@@ -71,10 +79,7 @@ def postgres_target_from_environment(
         values[name] = value
 
     database = values["CELESTIN_TEST_POSTGRES_DATABASE"]
-    if database in {
-        "celestin_schema_test_v2",
-        "celestin_it_20261014_a7f3c9",
-    } or not _DATABASE_NAME.fullmatch(database):
+    if database in _UNUSABLE_TEST_DATABASES or not _DATABASE_NAME.fullmatch(database):
         raise UnsafePostgresTestTarget(
             "the test database must use celestin_it_YYYYMMDD_<8-hex-nonce> "
             "with a newly provisioned nonce"
