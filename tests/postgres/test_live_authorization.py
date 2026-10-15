@@ -149,16 +149,21 @@ def tenant_fixture(postgres_connections):
             (ids["workspace_a"], ids["contender_user_id"]),
         )
 
-        for project_id, workspace_id, slug in (
-            (ids["project_a"], ids["workspace_a"], f"project-a-{suffix}"),
-            (ids["project_other"], ids["workspace_a"], f"project-other-{suffix}"),
-            (ids["project_b"], ids["workspace_b"], f"project-b-{suffix}"),
+        for project_id, workspace_id, slug, legacy_key in (
+            (ids["project_a"], ids["workspace_a"], f"project-a-{suffix}", project_key),
+            (
+                ids["project_other"],
+                ids["workspace_a"],
+                f"project-other-{suffix}",
+                f"other-key-{suffix}",
+            ),
+            (ids["project_b"], ids["workspace_b"], f"project-b-{suffix}", project_key),
         ):
             connection.execute(
                 """INSERT INTO celestin_projects
                        (id, workspace_id, slug, legacy_project_key)
                    VALUES (%s, %s, %s, %s)""",
-                (project_id, workspace_id, slug, project_key),
+                (project_id, workspace_id, slug, legacy_key),
             )
 
         for workspace_id, project_id in (

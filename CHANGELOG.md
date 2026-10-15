@@ -4,6 +4,13 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-10-15T21:55:54+05:30 — Reuse project keys across workspace fixtures
+
+- Changed: Updated the live authorization fixture so projects in separate workspaces share the same `legacy_project_key`, while another project in the first workspace keeps a distinct key.
+- Why: Exercise that public project-key resolution stays workspace-scoped when the same key exists in multiple workspaces.
+- Validation: `git diff --check` passed. No live PostgreSQL test was run because this change is in the live fixture and no newly approved disposable target was available.
+- Limitations: The fixture behavior still needs verification in an authorized live PostgreSQL run; no production authorization behavior changed.
+
 ## 2026-10-15T21:52:27+05:30 — Close tracked PostgreSQL cursors in live-test cleanup
 
 - Changed: `TrackedConnection.close()` now closes tracked open cursors, continues attempting remaining cursors if one close fails, and closes the underlying connection in a `finally` block. Added non-live coverage for idempotent closure and cleanup-error handling.
