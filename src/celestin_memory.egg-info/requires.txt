@@ -1,0 +1,11 @@
+mcp<2.0,>=1.0
+
+[pageindex]
+pageindex<0.5,>=0.4
+
+[semantic]
+sqlite-vec<0.2,>=0.1.9
+fastembed<1.0,>=0.9
+
+[test]
+pytest

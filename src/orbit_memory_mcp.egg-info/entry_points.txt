@@ -1,0 +1,3 @@
+[console_scripts]
+memory-bridge = orbit.mcp_server.server:main
+orbit = orbit.mcp_server.server:main

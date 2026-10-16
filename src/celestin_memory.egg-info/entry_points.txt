@@ -1,0 +1,6 @@
+[console_scripts]
+celestin = orbit.mcp_server.server:main
+celestin-docs = orbit.pageindex.cli:main
+celestin-index = orbit.semantic.cli:main
+memory-bridge = orbit.mcp_server.server:main
+orbit = orbit.mcp_server.server:main

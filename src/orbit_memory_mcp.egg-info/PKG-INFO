@@ -1,0 +1,168 @@
+Metadata-Version: 2.4
+Name: orbit-memory-mcp
+Version: 0.1.0
+Summary: An MCP-powered persistent memory system for AI agents and coding assistants.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: mcp<2.0,>=1.0
+Provides-Extra: test
+Requires-Dist: pytest; extra == "test"
+
+# Orbit — Persistent Memory for AI Agents
+
+Orbit is a local MCP server that gives AI agents project-scoped persistent
+memory. It stores chat messages and project decisions in SQLite, then provides
+tools to search chat history and retrieve a bounded, traceable context bundle.
+The server communicates with MCP clients over stdio.
+
+## Requirements
+
+- Python 3.10 or newer
+- SQLite built with FTS5 support (used for full-text search)
+- An MCP-compatible client for the tools; Codex CLI instructions are below
+
+The project uses the [Python MCP SDK](https://github.com/modelcontextprotocol/python-sdk)
+and Python's standard-library SQLite interface. It does not use an external
+dataset or embedding service.
+
+## Install
+
+From the repository root, create and activate a virtual environment, then
+install Orbit in editable mode:
+
+**macOS / Linux**
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+```
+
+**Windows PowerShell**
+
+```powershell
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -e .
+```
+
+Installation provides the `orbit` command. The SQLite database and its schema
+are created automatically the first time the server connects. By default, the
+database is `data/memory_bridge.db` relative to the process working directory.
+Set `MEMORY_BRIDGE_DB_PATH` to an absolute writable path to choose another
+location.
+
+## Run with Codex CLI
+
+Register Orbit as a local stdio MCP server. Set the database path to a location
+you can write to. Run this from a shell where the virtual environment is
+activated:
+
+**macOS / Linux**
+
+```sh
+codex mcp add orbit \
+  --env MEMORY_BRIDGE_DB_PATH=/absolute/path/to/orbit.db \
+  -- orbit
+codex mcp list
+```
+
+If Codex cannot find `orbit`, use the absolute path to `.venv/bin/orbit` after
+the `--` separator.
+
+**Windows PowerShell**
+
+```powershell
+codex mcp add orbit --env 'MEMORY_BRIDGE_DB_PATH=C:\path\to\orbit.db' -- .venv\Scripts\orbit.exe
+codex mcp list
+```
+
+Use an absolute executable path if needed, and quote it if the path contains
+spaces. Restart Codex after registration if it was already running. To remove
+the server later, run `codex mcp remove orbit`.
+
+Other MCP clients can launch `orbit` directly over stdio (or use the absolute
+path to the executable in `.venv`). A minimal client configuration is:
+
+```json
+{
+  "mcpServers": {
+    "orbit": {
+      "command": "orbit",
+      "args": [],
+      "env": {
+        "MEMORY_BRIDGE_DB_PATH": "/absolute/path/to/orbit.db"
+      }
+    }
+  }
+}
+```
+
+## Available tools
+
+- `ping` confirms that the server is responding.
+- `ingest_chat_message` stores a message under a project and conversation and
+  returns its `message_id`.
+- `save_decision` stores a project decision as a **draft**, linked to a message
+  in the same project. Pass the returned message ID as `source_message_id`.
+- `search_chat_history` searches project messages with plain text terms and
+  returns ranked results (default limit 10, maximum 100).
+- `retrieve_context` combines eligible decisions and relevant messages within
+  a required budget from 1 to 20,000 units.
+
+For example, in an MCP client, first call `ingest_chat_message` with:
+
+```json
+{
+  "project": "demo",
+  "conversation_id": "planning",
+  "role": "user",
+  "content": "We chose SQLite for local storage."
+}
+```
+
+Use the returned `message_id` in `save_decision`, for example with key
+`storage` and value `Use SQLite for local storage.` Then call
+`search_chat_history` with project `demo` and query `SQLite local`, or call
+`retrieve_context` with the same project and query plus a `token_budget` such
+as `2000`. Each tool call is made through the connected MCP client; Orbit does
+not include a separate web UI.
+
+## Behavior and limitations
+
+- Every read and write is scoped to the supplied project name. There is no
+  project registry, so an unknown project and a project with no matching data
+  both appear empty.
+- Newly saved decisions are drafts. Context retrieval excludes draft and
+  deprecated decisions by default and prioritizes approved decisions. The
+  current tool set does not include an approval or deprecation operation.
+- Context budgets count UTF-8 bytes as an estimate, not exact tokens for a
+  particular model. Records are included whole; oversized records are skipped.
+- Search uses SQLite FTS5. Queries are treated as plain Unicode terms joined
+  with AND; punctuation is discarded. Search scores are relevance values, not
+  probabilities.
+- The server currently supports local stdio only and has no caller
+  authentication or project authorization. Do not expose it as a remote
+  service.
+
+## Tests
+
+Install the optional test dependency and run the test suite from the repository
+root:
+
+```sh
+python -m pip install -e ".[test]"
+python -m pytest -q
+```
+
+The tests use temporary SQLite databases and synthetic records. They do not
+require network access after dependencies are installed.
+
+## Event documentation
+
+This project was developed for the DevDay Exchange Community: Kochi hackathon
+on 10–11 October 2026. See [RULES.md](RULES.md) for event requirements,
+[SUBMISSION.md](SUBMISSION.md) for submission details, [AI_USAGE.md](AI_USAGE.md)
+for the Codex usage record, and [CHANGELOG.md](CHANGELOG.md) for the development
+log. The [event and registration page](https://luma.com/z10nz8gp) has the event
+details.
