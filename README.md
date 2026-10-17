@@ -105,6 +105,15 @@ path to the executable in `.venv`). A minimal client configuration is:
 }
 ```
 
+### Optional Neon project tooling
+
+This checkout's `.codex/config.toml` registers the Neon MCP server with OAuth and
+pins its tools to the existing `celestin-dev` Neon project. On first use, reopen
+the project in Codex and complete Neon sign-in if prompted. This connection is
+for Neon project management; it does not switch Celestin's MCP server or local
+SQLite storage to Neon. PostgreSQL migrations remain an explicit operator
+action described in [PostgreSQL migrations](docs/postgres-migrations.md).
+
 ### Local project access
 
 The stdio server requires an explicit process-level project/action allowlist for

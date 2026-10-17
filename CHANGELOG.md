@@ -4,6 +4,13 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-10-16T14:09:31+05:30 — Add project-scoped Neon developer tooling
+
+- Changed: Installed the Neon and Neon PostgreSQL agent skills in `.agents/skills/`, added `.codex/config.toml` for the Neon OAuth MCP server pinned to the existing `celestin-dev` project, and documented the optional developer connection in the README.
+- Why: Make Neon project inspection available in this checkout without creating cloud resources or selecting Neon as Celestin's application database.
+- Validation: Neon CLI authentication and read-only project, branch, database, region, and Postgres-version metadata checks succeeded. `git diff --check` and `git diff --cached --check` passed. MCP tool connectivity was not yet available in the active Codex session; it requires reopening the project and completing first-use OAuth if prompted. No database connection or migration was run.
+- Limitations: The MCP OAuth handshake has not completed in this session. The PostgreSQL adapter remains unselected by the MCP server, and retrieval remains SQLite-backed.
+
 ## 2026-10-15T22:06:50+05:30 — Block previously used PostgreSQL test targets
 
 - Changed: The live-test target parser now rejects the two previously used disposable database names in addition to the older failed target. The PostgreSQL integration guide lists all three retired targets and says not to reuse them.
