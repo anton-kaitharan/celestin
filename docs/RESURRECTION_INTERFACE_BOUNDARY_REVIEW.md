@@ -12,8 +12,20 @@ The active `retrival` checkout is an older, partial product snapshot. The interf
 
 **Status labels:** `EXISTING` means directly present in source or current behavior; it does not imply a team-approved shared-storage decision. `PROPOSED` means a review suggestion, not an adopted rule. `UNRESOLVED` means no source-backed decision was found. `APPROVED` is reserved for a decision with explicit approval evidence.
 
+**Resolution as of 2026-10-19:** the initial v0.3 implementation decisions are recorded in the [final decision record](SHARED_MEMORY_INTERFACE_CONTRACT_V0.3_DECISIONS.md). The `PROPOSED` and `UNRESOLVED` labels in this review describe the 2026-10-18 review snapshot and are superseded for the first PostgreSQL Evidence/Knowledge implementation by that record.
+
 - **APPROVED (coordination only, per the shared-storage owner’s instruction supplied for this review):** the workstreams proceed in parallel and jointly review interface boundaries; neither workstream unilaterally decides candidate identity, revisions, replay, authorization, or public contracts.
 - **UNRESOLVED (approval status):** no detailed C1 storage, mapping, conversion, replay, or additive MCP decision was independently verifiable in the inspected repository. The evidence-linked-memory document calls its reconciliation section a design proposal and says no schema or adapter contract has been approved (`docs/evidence-linked-memory-contract.md:3-19,125-134`).
+
+## Shared-storage-side decision register
+
+The following proposals capture the shared-storage perspective supplied for the 2026-10-18 review. Their `PROPOSED` and `Open` labels are historical: the decision record linked above resolves these items for the first PostgreSQL Evidence/Knowledge implementation. Keep this register as review context, not as a current blocker list.
+
+- **ST-REV-01 — Candidate and revision identity** — **PROPOSED; needs joint discussion.** Owner: Capture/Resurrection and Storage. Keep candidate, immutable revision, delivery, conversion operation, and knowledge identities distinct. Bind approval to the exact reviewed revision and retain a durable link from the resulting knowledge record to that revision and conversion. Open: producer ID guarantees, revision format, and how corrections relate to already-converted knowledge.
+- **ST-REV-02 — Conversion and idempotency** — **PROPOSED; needs Storage design and joint acceptance.** Owner: Storage, with joint acceptance criteria. For an agreed operation identity, an authorized exact retry should return the original durable knowledge/evidence IDs; a changed canonical payload should conflict without mutation; concurrent identical attempts should converge on one durable outcome. Open: uniqueness key, canonical payload fields, and partial-failure recovery.
+- **ST-REV-03 — Authorization and transaction boundary** — **PROPOSED; needs joint discussion.** Owner: Storage and Product/Security. Authenticate and authorize at the trusted application boundary, verify approval for the exact revision, and define how authorization and writes share a consistency boundary, including concurrent revocation. Open: local operator approval policy, hosted identity and permissions, and revocation ordering.
+- **ST-REV-04 — Knowledge-state read interface** — **PROPOSED boundary.** Owner: Retrieval/Resurrection defines domain needs; Storage implements the durable adapter. Provide a project-scoped, authorized read port for knowledge, evidence, provenance, and reconstruction relationships, without exposing database-specific details. Open: query/filter shapes, pagination, consistency, and unavailable evidence behavior.
+- **ST-REV-05 — MCP compatibility** — **PROPOSED default.** Owner: MCP/API and both workstreams. Keep knowledge-state enrichment internal while its consumer need is unsettled; public MCP response changes require explicit review and compatibility coverage. Open: which consumer-facing feature justifies a public response change.
 
 ## 1. Knowledge-state read port
 
