@@ -70,6 +70,23 @@ class CaptureSourceReference:
 
 
 @dataclass(frozen=True, slots=True)
+class CaptureOccurrence:
+    """One accepted occurrence in a single local Capture invocation.
+
+    ``ordinal`` records this result's accepted input order. It is not a
+    producer-issued occurrence ID or a durable identity. ``evidence_sources``
+    retains references supplied with this local event; it is not a persistent
+    EvidenceRecord association. Candidate-level evidence may independently
+    deduplicate those references.
+    """
+
+    ordinal: int
+    candidate_id: str
+    source_reference: CaptureSourceReference
+    evidence_sources: tuple[EvidenceSource, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class KnowledgeCandidate:
     candidate_id: str
     project_id: str
@@ -104,3 +121,4 @@ class CaptureResult:
     candidates: tuple[KnowledgeCandidate, ...]
     suppressed: tuple[SuppressedCapture, ...]
     duplicate_count: int
+    occurrences: tuple[CaptureOccurrence, ...] = ()

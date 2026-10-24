@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from tests.postgres.live_support import (
@@ -11,6 +13,7 @@ from tests.postgres.live_support import (
     postgres_target_from_environment,
     server_address_matches_target,
     verify_connection_identity,
+    verify_runtime_connection_identity,
 )
 
 
@@ -18,12 +21,30 @@ NONCE = "a1b2c3d4"
 
 
 def target_environment(**changes):
+    database = f"celestin_it_20261014_{NONCE}"
     values = {
+        "CELESTIN_TEST_POSTGRES_DISPOSABLE": "true",
         "CELESTIN_TEST_POSTGRES_DSN": (
-            f"host=127.0.0.1 port=5432 dbname=celestin_it_20261014_{NONCE} "
+            f"host=127.0.0.1 port=5432 dbname={database} "
             f"user=celestin_it_user_{NONCE}"
         ),
-        "CELESTIN_TEST_POSTGRES_DATABASE": f"celestin_it_20261014_{NONCE}",
+        "CELESTIN_TEST_POSTGRES_ADMIN_DSN": (
+            f"host=127.0.0.1 port=5432 dbname={database} user=celestin_it_admin_{NONCE}"
+        ),
+        "CELESTIN_TEST_POSTGRES_ADMIN_USER": f"celestin_it_admin_{NONCE}",
+        "CELESTIN_TEST_POSTGRES_AUTHORIZATION_DSN": (
+            f"host=127.0.0.1 port=5432 dbname={database} user=celestin_it_reader_{NONCE}"
+        ),
+        "CELESTIN_TEST_POSTGRES_AUTHORIZATION_USER": f"celestin_it_reader_{NONCE}",
+        "CELESTIN_TEST_POSTGRES_PROJECT_A_DSN": (
+            f"host=127.0.0.1 port=5432 dbname={database} user=celestin_it_project_a_{NONCE}"
+        ),
+        "CELESTIN_TEST_POSTGRES_PROJECT_A_USER": f"celestin_it_project_a_{NONCE}",
+        "CELESTIN_TEST_POSTGRES_PROJECT_B_DSN": (
+            f"host=127.0.0.1 port=5432 dbname={database} user=celestin_it_project_b_{NONCE}"
+        ),
+        "CELESTIN_TEST_POSTGRES_PROJECT_B_USER": f"celestin_it_project_b_{NONCE}",
+        "CELESTIN_TEST_POSTGRES_DATABASE": database,
         "CELESTIN_TEST_POSTGRES_USER": f"celestin_it_user_{NONCE}",
         "CELESTIN_TEST_POSTGRES_HOST": "127.0.0.1",
         "CELESTIN_TEST_POSTGRES_PORT": "5432",
@@ -40,6 +61,10 @@ def test_accepts_only_explicit_matching_loopback_target_and_hides_dsn():
     assert target.host == "127.0.0.1"
     assert target.port == 5432
     assert target.dsn not in repr(target)
+    assert target.admin_dsn not in repr(target)
+    assert target.authorization_dsn not in repr(target)
+    assert target.project_a_dsn not in repr(target)
+    assert target.project_b_dsn not in repr(target)
     assert "password" not in repr(target).lower()
 
 
@@ -62,9 +87,10 @@ def test_rejects_the_previously_failed_target_even_with_matching_coordinates():
     [
         "celestin_it_20261015_b364bbae",
         "celestin_it_20261015_10ac5ae9",
+        "celestin_it_20261015_0b8e767c",
     ],
 )
-def test_rejects_previously_used_targets_even_with_matching_coordinates(database):
+def test_rejects_retired_targets_even_with_matching_coordinates(database):
     nonce = database.rsplit("_", 1)[-1]
     user = f"celestin_it_user_{nonce}"
     values = target_environment(
@@ -77,6 +103,27 @@ def test_rejects_previously_used_targets_even_with_matching_coordinates(database
 
     with pytest.raises(UnsafePostgresTestTarget, match="test database"):
         postgres_target_from_environment(values)
+
+
+def test_schema_validation_script_requires_a_named_non_retired_target():
+    script = (
+        Path(__file__).with_name("validate_hosted_schema.sql")
+        .read_text(encoding="utf-8")
+    )
+
+    assert r"\if :{?approved_test_database}" in script
+    assert "current_database() = :'approved_test_database'" in script
+    assert "^celestin_it_[0-9]{8}_[0-9a-f]{8}$" in script
+    for retired_database in (
+        "celestin_schema_test_v2",
+        "celestin_it_20261014_a7f3c9",
+        "celestin_it_20261015_b364bbae",
+        "celestin_it_20261015_10ac5ae9",
+        "celestin_it_20261015_0b8e767c",
+    ):
+        assert f"'{retired_database}'" in script
+    assert "-d celestin_schema_test_v2" not in script
+    assert "expected celestin_schema_test_v2" not in script
 
 
 @pytest.mark.parametrize(
@@ -104,6 +151,36 @@ def test_rejects_previously_used_targets_even_with_matching_coordinates(database
 def test_rejects_unsafe_or_mismatched_target(changes, message):
     with pytest.raises(UnsafePostgresTestTarget, match=message):
         postgres_target_from_environment(target_environment(**changes))
+
+
+def test_requires_explicit_disposable_database_acknowledgement():
+    with pytest.raises(UnsafePostgresTestTarget, match="DISPOSABLE must explicitly be true"):
+        postgres_target_from_environment(
+            target_environment(CELESTIN_TEST_POSTGRES_DISPOSABLE="false")
+        )
+
+
+def test_requires_distinct_preprovisioned_runtime_identities():
+    values = target_environment(
+        CELESTIN_TEST_POSTGRES_PROJECT_B_USER=f"celestin_it_project_a_{NONCE}",
+        CELESTIN_TEST_POSTGRES_PROJECT_B_DSN=(
+            f"host=127.0.0.1 port=5432 dbname=celestin_it_20261014_{NONCE} "
+            f"user=celestin_it_project_a_{NONCE}"
+        ),
+    )
+    with pytest.raises(UnsafePostgresTestTarget, match="roles must be distinct"):
+        postgres_target_from_environment(values)
+
+
+def test_rejects_runtime_dsn_with_wrong_role_even_if_target_matches():
+    values = target_environment(
+        CELESTIN_TEST_POSTGRES_PROJECT_A_DSN=(
+            f"host=127.0.0.1 port=5432 dbname=celestin_it_20261014_{NONCE} "
+            f"user=celestin_it_project_b_{NONCE}"
+        )
+    )
+    with pytest.raises(UnsafePostgresTestTarget, match="distinct role"):
+        postgres_target_from_environment(values)
 
 
 def test_missing_target_field_is_rejected_without_database_fallback():
@@ -195,7 +272,7 @@ class _IdentityConnection:
         self.identity = identity
         self.query = None
 
-    def execute(self, query):
+    def execute(self, query, _params=()):
         self.query = query
         return self
 
@@ -207,8 +284,10 @@ def _safe_identity(**overrides):
     identity = [
         "celestin_it_20261014_a1b2c3d4",
         "celestin_it_user_a1b2c3d4",
+        "celestin_it_user_a1b2c3d4",
         "127.0.0.1/32",
         5432,
+        True,  # database owner
         False,  # SUPERUSER
         False,  # CREATEROLE
         False,  # CREATEDB
@@ -219,14 +298,16 @@ def _safe_identity(**overrides):
     positions = {
         "database": 0,
         "user": 1,
-        "host": 2,
-        "port": 3,
-        "superuser": 4,
-        "create_roles": 5,
-        "create_databases": 6,
-        "replication": 7,
-        "bypass_rls": 8,
-        "disallowed_memberships": 9,
+        "session_user": 2,
+        "host": 3,
+        "port": 4,
+        "owns_database": 5,
+        "superuser": 6,
+        "create_roles": 7,
+        "create_databases": 8,
+        "replication": 9,
+        "bypass_rls": 10,
+        "disallowed_memberships": 11,
     }
     for key, value in overrides.items():
         identity[positions[key]] = value
@@ -240,6 +321,7 @@ def test_identity_accepts_scoped_non_superuser_role():
     verify_connection_identity(connection, target)
 
     assert "pg_database_owner" in connection.query
+    assert "database.datdba = role.oid AS owns_database" in connection.query
     assert "pg_catalog.pg_has_role(current_user, granted_role.oid, 'MEMBER')" in connection.query
 
 
@@ -261,6 +343,105 @@ def test_identity_rejects_disallowed_role_memberships():
 
     with pytest.raises(UnsafePostgresTestTarget, match="role privileges"):
         verify_connection_identity(connection, target)
+
+
+def test_identity_rejects_migration_login_that_does_not_own_target_database():
+    connection = _IdentityConnection(_safe_identity(owns_database=False))
+    target = postgres_target_from_environment(target_environment())
+
+    with pytest.raises(UnsafePostgresTestTarget, match="role privileges"):
+        verify_connection_identity(connection, target)
+
+
+def test_identity_rejects_current_role_that_differs_from_authenticated_session_user():
+    connection = _IdentityConnection(
+        _safe_identity(session_user="another_role_a1b2c3d4")
+    )
+    target = postgres_target_from_environment(target_environment())
+
+    with pytest.raises(UnsafePostgresTestTarget, match="identity or role privileges"):
+        verify_connection_identity(connection, target)
+
+
+class _RuntimeIdentityConnection:
+    def __init__(self, identity):
+        self.identity = identity
+        self.query = None
+
+    def execute(self, query, _params=()):
+        self.query = query
+        return self
+
+    def fetchone(self):
+        return self.identity
+
+
+def _safe_runtime_identity(**overrides):
+    identity = [
+        "celestin_it_20261014_a1b2c3d4",
+        "celestin_it_project_a_a1b2c3d4",
+        "celestin_it_project_a_a1b2c3d4",
+        "127.0.0.1/32",
+        5432,
+        False, False, False, False, False, True,
+        True, True, True, True, True,
+    ]
+    positions = {
+        "database": 0, "current_user": 1, "session_user": 2,
+        "host": 3, "port": 4, "superuser": 5, "create_roles": 6,
+        "create_databases": 7, "replication": 8, "bypass_rls": 9,
+        "inherit": 10, "expected_group": 11, "other_groups": 12,
+        "admin_option": 13, "owns_table": 14, "can_create_schema": 15,
+    }
+    for key, value in overrides.items():
+        identity[positions[key]] = value
+    return tuple(identity)
+
+
+def test_runtime_identity_accepts_only_the_expected_direct_project_login():
+    target = postgres_target_from_environment(target_environment())
+    connection = _RuntimeIdentityConnection(_safe_runtime_identity())
+    verify_runtime_connection_identity(
+        connection,
+        target,
+        expected_user=target.project_a_user,
+        expected_group="celestin_project_runtime",
+    )
+    assert "membership.admin_option" in connection.query
+
+
+@pytest.mark.parametrize(
+    "attribute, value",
+    [
+        ("database", "different_db"),
+        ("current_user", "another_role"),
+        ("session_user", "another_role"),
+        ("host", "192.0.2.10"),
+        ("port", 5433),
+        ("superuser", True),
+        ("create_roles", True),
+        ("create_databases", True),
+        ("replication", True),
+        ("bypass_rls", True),
+        ("inherit", False),
+        ("expected_group", False),
+        ("other_groups", False),
+        ("admin_option", False),
+        ("owns_table", False),
+        ("can_create_schema", False),
+    ],
+)
+def test_runtime_identity_rejects_wrong_target_or_unsafe_role(attribute, value):
+    target = postgres_target_from_environment(target_environment())
+    connection = _RuntimeIdentityConnection(_safe_runtime_identity(**{attribute: value}))
+
+    with pytest.raises(UnsafePostgresTestTarget, match="isolated test role"):
+        verify_runtime_connection_identity(
+            connection,
+            target,
+            expected_user=target.project_a_user,
+            expected_group="celestin_project_runtime",
+        )
 
 
 @pytest.mark.parametrize(

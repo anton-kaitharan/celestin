@@ -14,8 +14,27 @@ from uuid import UUID
 
 
 PrincipalKind = Literal["human", "service"]
-ProjectAction = Literal["read", "write"]
-ProjectPermission = Literal["read", "write"]
+ProjectAction = Literal[
+    "read",
+    "write",
+    "memory:read",
+    "candidate:approve",
+    "memory:convert",
+    "memory:history",
+    "audit:read",
+]
+ProjectPermission = ProjectAction
+_PROJECT_PERMISSIONS = frozenset(
+    {
+        "read",
+        "write",
+        "memory:read",
+        "candidate:approve",
+        "memory:convert",
+        "memory:history",
+        "audit:read",
+    }
+)
 _SCOPE_ISSUER = object()
 
 
@@ -116,8 +135,8 @@ class ResolvedProjectScope:
             raise ValueError("project_key must be a non-empty string")
         if not isinstance(self.permissions, frozenset):
             raise TypeError("permissions must be a frozenset")
-        if not self.permissions or not self.permissions <= {"read", "write"}:
-            raise ValueError("permissions must contain read and/or write")
+        if not self.permissions or not self.permissions <= _PROJECT_PERMISSIONS:
+            raise ValueError("permissions contain an unsupported project capability")
         if "write" in self.permissions and "read" not in self.permissions:
             raise ValueError("write permission requires read permission")
 
@@ -145,6 +164,10 @@ class ProjectAccessRecord:
     grant_revoked: bool
     can_read: bool
     can_write: bool
+    can_approve_candidates: bool = False
+    can_convert_memory: bool = False
+    can_read_history: bool = False
+    can_read_audit: bool = False
 
     def __post_init__(self) -> None:
         for name in ("principal_id", "workspace_id", "project_id"):
@@ -163,6 +186,10 @@ class ProjectAccessRecord:
             "grant_revoked",
             "can_read",
             "can_write",
+            "can_approve_candidates",
+            "can_convert_memory",
+            "can_read_history",
+            "can_read_audit",
         ):
             if type(getattr(self, name)) is not bool:
                 raise TypeError(f"{name} must be a bool")
@@ -194,9 +221,16 @@ class PrincipalStatusProvider(Protocol):
 
 
 class WorkspaceBinding(Protocol):
-    """Returns a server/credential-bound workspace, never one from tool input."""
+    """Resolve an untrusted transport selector for database authorization.
 
-    def workspace_for(self, principal: VerifiedPrincipal) -> UUID | None: ...
+    The selector is not an authorization claim. Implementations return a
+    workspace candidate; the authorization session must still verify the
+    principal's active binding and project grant in the request transaction.
+    """
+
+    def workspace_for(
+        self, principal: VerifiedPrincipal, requested_workspace_id: UUID | None = None
+    ) -> UUID | None: ...
 
 
 class HostedAuthorizationSession(Protocol):
@@ -237,17 +271,21 @@ class HostedScopeResolver:
         principal: VerifiedPrincipal,
         project_key: str,
         action: ProjectAction,
+        *,
+        requested_workspace_id: UUID | None = None,
     ) -> ResolvedProjectScope:
         """Return a scope only when all identity, lifecycle, and grant checks pass."""
         if not isinstance(principal, VerifiedPrincipal):
             raise HostedAccessDenied("access denied")
-        if action not in ("read", "write"):
+        if action not in _PROJECT_PERMISSIONS:
             raise HostedAccessDenied("access denied")
         if not isinstance(project_key, str) or not project_key.strip() or "\x00" in project_key:
             raise HostedAccessDenied("access denied")
 
         try:
-            workspace_id = self._workspace_binding.workspace_for(principal)
+            workspace_id = self._workspace_binding.workspace_for(
+                principal, requested_workspace_id
+            )
             if not isinstance(workspace_id, UUID):
                 raise HostedAccessDenied("access denied")
             # A database-backed session owns the authoritative identity lookup
@@ -298,13 +336,21 @@ class HostedScopeResolver:
         elif record.service_status != "active":
             raise HostedAccessDenied("access denied")
 
-        permissions: frozenset[ProjectPermission]
+        permissions_set: set[ProjectPermission] = set()
+        if record.can_read:
+            permissions_set.add("read")
+            permissions_set.add("memory:read")
         if record.can_write:
-            permissions = frozenset({"read", "write"})
-        elif record.can_read:
-            permissions = frozenset({"read"})
-        else:
-            raise HostedAccessDenied("access denied")
+            permissions_set.add("write")
+        if principal.kind == "human" and record.can_approve_candidates:
+            permissions_set.add("candidate:approve")
+        if record.can_convert_memory:
+            permissions_set.add("memory:convert")
+        if record.can_read_history:
+            permissions_set.add("memory:history")
+        if record.can_read_audit:
+            permissions_set.add("audit:read")
+        permissions = frozenset(permissions_set)
 
         if action not in permissions:
             raise HostedAccessDenied("access denied")
@@ -359,6 +405,7 @@ class HostedScopeResolver:
         operation: Callable[[SessionT, ResolvedProjectScope], ResultT],
         *,
         source_message_id: str | None = None,
+        requested_workspace_id: UUID | None = None,
     ) -> ResultT:
         """Authorize first, then call the operation with the same request session.
 
@@ -366,7 +413,20 @@ class HostedScopeResolver:
         must share it so a PostgreSQL implementation can lock/recheck grants and
         serialize revocation against data access.
         """
-        scope = self.resolve(session, principal, project_key, action)
+        scope = self.resolve(
+            session,
+            principal,
+            project_key,
+            action,
+            requested_workspace_id=requested_workspace_id,
+        )
+        # PostgreSQL request sessions set transaction-local RLS context only
+        # after authorization, but before any source/data query. This matters
+        # for source-message validation because chat_messages itself is RLS-
+        # protected in the hosted schema.
+        bind_scope = getattr(session, "bind_scope", None)
+        if callable(bind_scope):
+            bind_scope(scope)
         if source_message_id is not None:
             self.require_source_message(session, scope, source_message_id)
         return operation(session, scope)

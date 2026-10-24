@@ -42,13 +42,14 @@ caller-chosen label.
 
 ## Authorization, cursors, and delivery
 
-Every publish call requires an `AuthorizedProject` with `write`; every read
-requires one with `read`. The submitted project must exactly match that scope.
-The transport/application caller must obtain this object from the existing
-authorization boundary for every operation. The current dataclass is
-constructible in Python, so passing a forged scope directly to this prototype
-is possible if an application bypasses its policy. A hosted caller must make
-scope construction private to the trusted authorization path and re-check
+Every publish call requires a `write` project selector; every read requires a
+`read` selector. The service re-authorizes the selected project through its
+injected `ProjectAuthorizer`, using the principal fixed by the trusted service
+factory. The caller-supplied scope's principal is ignored, and the submitted
+project must match the selected project. This is a domain guard, not transport
+authentication: untrusted callers must not construct the service with a
+permissive authorizer or select its principal. Hosted integration must provide
+the trusted principal and authorizer at the application boundary and re-check
 membership/revocation on every publish and page read. No client project ID or
 client label can stand in for that check.
 

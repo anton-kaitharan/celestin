@@ -14,6 +14,7 @@ from tests.postgres.live_support import (
     initialize_fresh_database,
     postgres_target_from_environment,
     verify_connection_identity,
+    verify_runtime_connection_identity,
 )
 
 
@@ -31,12 +32,22 @@ def pytest_configure(config):
         "markers",
         "postgres_integration: requires explicit opt-in and a disposable PostgreSQL database",
     )
+    config.addinivalue_line(
+        "markers",
+        "postgres_evidence_integration: separate Evidence adapter suite; not part of the hosted project-runtime RLS gate",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
     if config.getoption("--run-postgres-integration"):
         return
-    skip_live = pytest.mark.skip(reason="pass --run-postgres-integration to opt in")
+    skip_live = pytest.mark.skip(
+        reason=(
+            "requires --run-postgres-integration and a fresh loopback disposable target "
+            "configured with all CELESTIN_TEST_POSTGRES_* variables; see "
+            "docs/postgres-integration-tests.md"
+        )
+    )
     for item in items:
         if item.get_closest_marker("postgres_integration"):
             item.add_marker(skip_live)
@@ -100,16 +111,30 @@ def live_postgres(request):
     if not request.config.getoption("--run-postgres-integration"):
         pytest.skip("pass --run-postgres-integration to opt in")
 
-    dsn = os.environ.get("CELESTIN_TEST_POSTGRES_DSN", "")
-    if not dsn:
-        pytest.skip("CELESTIN_TEST_POSTGRES_DSN is not set")
-
-    try:
-        import psycopg
-    except ImportError:
-        pytest.fail(
-            "Psycopg is missing; install the optional extra in the validation environment with "
-            '.venv\\validation\\Scripts\\python.exe -m pip install -e ".[postgres,test]"'
+    missing = [
+        name
+        for name in (
+            "CELESTIN_TEST_POSTGRES_DISPOSABLE",
+            "CELESTIN_TEST_POSTGRES_DSN",
+            "CELESTIN_TEST_POSTGRES_DATABASE",
+            "CELESTIN_TEST_POSTGRES_USER",
+            "CELESTIN_TEST_POSTGRES_HOST",
+            "CELESTIN_TEST_POSTGRES_PORT",
+            "CELESTIN_TEST_POSTGRES_ADMIN_DSN",
+            "CELESTIN_TEST_POSTGRES_ADMIN_USER",
+            "CELESTIN_TEST_POSTGRES_AUTHORIZATION_DSN",
+            "CELESTIN_TEST_POSTGRES_AUTHORIZATION_USER",
+            "CELESTIN_TEST_POSTGRES_PROJECT_A_DSN",
+            "CELESTIN_TEST_POSTGRES_PROJECT_A_USER",
+            "CELESTIN_TEST_POSTGRES_PROJECT_B_DSN",
+            "CELESTIN_TEST_POSTGRES_PROJECT_B_USER",
+        )
+        if not os.environ.get(name, "").strip()
+    ]
+    if missing:
+        pytest.skip(
+            "approved disposable PostgreSQL target is not fully configured; missing "
+            + ", ".join(missing)
         )
 
     try:
@@ -119,11 +144,38 @@ def live_postgres(request):
     except UnsafePostgresTestTarget as exc:
         pytest.fail(str(exc))
 
+    try:
+        import psycopg
+    except ImportError:
+        pytest.fail(
+            "Psycopg is missing; install the optional extra in the validation environment with "
+            '.venv\\validation\\Scripts\\python.exe -m pip install -e ".[postgres,test]"'
+        )
+
     connection = None
+    role_connections = []
     failure: str | None = None
     migration_result = None
     migrations = ()
     try:
+        for dsn, expected_user, expected_group in (
+            (target.admin_dsn, target.admin_user, "celestin_authorization_admin"),
+            (
+                target.authorization_dsn,
+                target.authorization_user,
+                "celestin_authorization_reader",
+            ),
+            (target.project_a_dsn, target.project_a_user, "celestin_project_runtime"),
+            (target.project_b_dsn, target.project_b_user, "celestin_project_runtime"),
+        ):
+            role_connection = psycopg.connect(dsn, autocommit=True)
+            role_connections.append(role_connection)
+            verify_runtime_connection_identity(
+                role_connection,
+                target,
+                expected_user=expected_user,
+                expected_group=expected_group,
+            )
         connection = psycopg.connect(target.dsn, autocommit=True)
         migrations = load_migrations()
         if not migrations:
@@ -142,6 +194,11 @@ def live_postgres(request):
         # Driver exceptions can contain DSNs and other connection details.
         failure = f"PostgreSQL preflight or migration failed ({type(exc).__name__}); details withheld"
     finally:
+        for role_connection in role_connections:
+            try:
+                role_connection.close()
+            except Exception:
+                failure = "a PostgreSQL runtime-role preflight session could not be closed"
         if connection is not None:
             try:
                 connection.close()

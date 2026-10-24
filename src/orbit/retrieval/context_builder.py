@@ -8,6 +8,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
+from .knowledge_state import KnowledgeStateEnvelope
 from .ranking import RankingPolicy, RetrievalCandidate, _rank_candidates_with_exclusions
 
 DEFAULT_TOKEN_BUDGET = 2_000
@@ -45,6 +46,7 @@ class ContextItem:
     status: str | None
     relevance_score: float
     content: str
+    knowledge_state: KnowledgeStateEnvelope | None = None
 
     @classmethod
     def from_candidate(cls, candidate: RetrievalCandidate) -> ContextItem:
@@ -57,10 +59,11 @@ class ContextItem:
             status=candidate.status,
             relevance_score=candidate.relevance_score,
             content=candidate.content,
+            knowledge_state=candidate.knowledge_state,
         )
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "record_id": self.record_id,
             "project_id": self.project_id,
             "source_id": self.source_id,
@@ -70,6 +73,9 @@ class ContextItem:
             "relevance_score": self.relevance_score,
             "content": self.content,
         }
+        if self.knowledge_state is not None:
+            result["knowledge_state"] = self.knowledge_state.as_dict()
+        return result
 
 
 @dataclass(frozen=True, slots=True)

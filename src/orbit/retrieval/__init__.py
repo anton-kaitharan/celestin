@@ -23,6 +23,11 @@ from .ranking import (
     RetrievalCandidate,
     rank_candidates,
 )
+from .knowledge_state import (
+    KnowledgeStateEnvelope,
+    KnowledgeStateReader,
+    KnowledgeStateScopeError,
+)
 from .service import (
     DECISION_FTS_SCHEMA,
     MESSAGE_FTS_SCHEMA,
@@ -48,6 +53,9 @@ __all__ = [
     "RankingPolicy",
     "RetrievalCandidate",
     "rank_candidates",
+    "KnowledgeStateEnvelope",
+    "KnowledgeStateReader",
+    "KnowledgeStateScopeError",
     "DEFAULT_TOKEN_BUDGET",
     "ContextBundle",
     "ContextItem",

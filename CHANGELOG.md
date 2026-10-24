@@ -4,12 +4,422 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-10-24T07:29:16+05:30 — Merge current main into the hosted-tenancy PR branch
+
+- Changed: Merged the current `origin/main` history into `codex/celestin-hosted-tenancy-spike`. Resolved the PR conflict set while retaining both branches' dated AI/changelog records, using the current PostgreSQL integration guide and safety checks, preserving the Neon skill lock entries, and retaining the additional project fixture.
+- Why: Bring PR #21 up to date with main without dropping the branch's four intended changes or importing a conflicting history rewrite.
+- Validation: Focused PostgreSQL support/auth suite — 73 passed, 21 live cases skipped. Broad suite excluding `tests/evidence/test_canonicalization.py` — 769 passed, 48 skipped, 1 warning. Source and test compilation and diff checks were run separately.
+- Limitations: The unfiltered suite cannot collect the canonicalization tests because `rfc8785` is unavailable in this validation environment. Live PostgreSQL cases were skipped because no approved disposable target is configured; no database, migration, or Auth0 operation was performed.
+
+## 2026-10-23T22:00:35+05:30 — Separate Evidence adapter tests from the hosted RLS gate
+
+- Changed: Assigned the adapter-level Evidence suite its own pytest marker and documented its exact opt-in command separately from project-login authorization/RLS acceptance. Clarified that these tests currently use a control-plane connection and do not prove project-runtime Evidence access.
+- Why: The existing Evidence adapter tests do not exercise the project's restricted login identity and must not be counted as hosted tenant-isolation evidence.
+- Validation: The focused combined offline PostgreSQL/readiness suite completed with 226 passed and 28 opt-in live tests skipped; the suite was run without the PostgreSQL opt-in flag. Documentation and staged-diff whitespace checks passed.
+- Limitations: No live PostgreSQL target was configured or used. Hosted project-runtime Evidence grants and request composition remain unsupported and require a reviewed contract.
+
+## 2026-10-23T22:00:08+05:30 — Require safe PostgreSQL test-role ownership and memberships
+
+- Changed: The guarded live-test preflight now requires the migration login to own the target database and rejects runtime-role membership with `ADMIN OPTION`; added regression coverage for both checks.
+- Why: The disposable test harness must not begin migration setup with an unexpected database owner or roles capable of granting themselves further membership.
+- Validation: `python -m pytest -p no:cacheprovider -o addopts='' tests\postgres\test_live_support.py` — 73 passed. No PostgreSQL connection or migration was run.
+- Limitations: Database ownership and role catalog results were tested with fakes only; the live target still requires explicit owner approval and PostgreSQL verification.
+
+## 2026-10-23T21:58:56+05:30 — Harden hosted PostgreSQL tenant readiness and locking
+
+- Changed: Replaced substring-based readiness checks with fail-closed catalog comparisons for expected RLS policies and authorization helpers; expanded effective-privilege and role-membership checks; added migration 0009 and request routing so project logins can lock only their mapped workspace while the authorization reader retains broad locks.
+- Why: Hosted startup must reject policy/helper drift and escalation, and a project credential must not be able to hold arbitrary authorization locks against another tenant.
+- Validation: `python -m pytest -p no:cacheprovider -o addopts='' tests\test_hosted_server.py` — 100 passed. The final combined offline suite also passed (226 passed, 28 live skipped); Python compilation and diff checks passed.
+- Limitations: Catalog expectations and migration 0009 have not been checked against a live PostgreSQL server. No database connection, SQL execution, migration, Auth0 request, or external operation was performed.
+
+## 2026-10-23T20:51:32+05:30 — Guard project-role PostgreSQL integration tests
+
+- Changed: Extended the existing live PostgreSQL fixture to require an explicit disposable-target acknowledgement and distinct pre-provisioned authorization/project logins. Added direct-SQL tests for forged GUCs, cross-project access, role switching, and scope-map protection; clarified the live-test setup requirements.
+- Why: The RLS isolation claim requires tests to exercise actual project login identities and must not run against an unknown database target.
+- Validation: `python -B -m pytest -p no:cacheprovider -o addopts='' tests/postgres/test_live_support.py tests/postgres/test_live_authorization.py` — 71 passed, 20 live PostgreSQL tests skipped. Changed test modules compiled; `git diff --check` and `git diff --cached --check` passed.
+- Limitations: The live cases were skipped because no approved disposable PostgreSQL target was configured. SQL, RLS, role, and advisory-lock behavior remains unverified against a server.
+
+## 2026-10-23T20:50:53+05:30 — Route hosted requests through project PostgreSQL pools
+
+- Changed: Updated the hosted runtime to use a read-only authorization pool first, then select only the configured project-specific pool for the resolved scope. Added final in-transaction authorization and startup role checks; documented the configuration and trust boundary while preserving local stdio/SQLite behavior.
+- Why: Project-scoped database identities must be selected only after application authorization and checked again in the data transaction.
+- Validation: `python -B -m pytest -p no:cacheprovider -o addopts='' tests/test_hosted_server.py` — 53 passed. The hosted module compiled; `git diff --check` and `git diff --cached --check` passed.
+- Limitations: Hosted mode remains disabled by default. No live PostgreSQL target, credentials, Auth0 service, or deployment was used; database role and RLS behavior remains unverified.
+
+## 2026-10-23T20:50:28+05:30 — Bind PostgreSQL RLS to project logins
+
+- Changed: Added migration `0008_project_scoped_runtime_roles.sql`, a protected `session_user`-to-project scope map, and authorization-lock coordination for project login provisioning and revocation.
+- Why: The former shared runtime credential could choose caller-settable tenant GUCs. Project-specific database identities provide the tenant scope used by RLS policies.
+- Validation: `python -B -m pytest -p no:cacheprovider -o addopts='' tests/postgres/test_migration_runner.py tests/postgres/test_provisioning.py tests/postgres/test_request_unit_of_work.py tests/postgres/test_hosted_authorization.py` — 71 passed. Changed PostgreSQL modules compiled; `git diff --check` and `git diff --cached --check` passed.
+- Limitations: Live SQL/RLS behavior remains unverified; the live PostgreSQL environment was not used. Hosted runtime routing and the guarded live-test suite are recorded in subsequent entries.
+
+## 2026-10-23T19:35:21+05:30 — Document PostgreSQL RLS trust boundary
+
+- Changed: Added a source-derived inventory for all twelve content tables protected by migrations 0006–0007, listed the authorization/control tables without RLS, and documented that the current custom-GUC scope can be set by the shared runtime role. Clarified that existing live-owner tests do not prove direct-SQL isolation under the application role.
+- Why: Prevent the current scope predicates and migration-owner tests from being mistaken for a defense against direct SQL using the hosted runtime credential.
+- Validation: Focused offline PostgreSQL/Auth0/UoW/runtime suite — 142 passed, 26 skipped. Full repository suite — 704 passed, 46 skipped after installing the already-declared `rfc8785>=0.1.4,<0.2` only into a temporary validation venv outside the repository. `git diff --check` run after documentation updates.
+- Limitations: No database was connected to, inspected, or migrated. No app-role catalog or direct-SQL test ran. A reviewed unforgeable RLS request-context design and explicitly approved fresh local PostgreSQL target/runtime role remain required.
+
+## 2026-10-23T18:53:08+05:30 — Add opt-in hosted Auth0/PostgreSQL runtime
+
+- Changed: Added a separate `celestin-hosted` Streamable HTTP entry point with Auth0 access-token verification, a fixed approved-client allowlist and scopes, explicit workspace context, the existing authorized request UoW for current memory tools, bounded PostgreSQL pool/HTTP settings, TLS requirements, sanitized errors, health/readiness checks, and loopback-by-default binding. Added internal workspace-admin-authorized human/service provisioning and revocation operations. Added migration `0007_memory_request_rls.sql` to apply forced request-scope RLS to `chat_messages` and `project_memory`. Added a runtime-role catalog check for forced RLS, current tool privileges, and absence of excessive/unexposed table privileges. Updated README and PostgreSQL operations documentation.
+- Why: Provide a separate, explicit hosted request path while keeping local stdio/SQLite commands and public tool schemas unchanged, and ensure hosted database access fails closed when authentication or database role/RLS prerequisites are unsafe.
+- Validation: Python 3.13.9 / pytest 8.4.2: focused hosted/auth/UoW/provisioning/live-test collection command — 127 passed, 26 skipped; broad suite excluding `tests/evidence/test_canonicalization.py` — 663 passed, 46 skipped; changed-Python syntax compilation — 22 files passed; `git diff --check` and `git diff --cached --check` — passed. Unfiltered suite attempted and blocked at collection because the active environment lacks the declared `rfc8785` dependency.
+- Limitations: No Auth0 tenant/configuration, secrets, PostgreSQL driver, approved disposable target, database connection, or migration run is available or claimed. Live PostgreSQL/RLS/runtime-role behavior and Auth0 end-to-end behavior remain unverified. Initial workspace/owner bootstrap, Auth0 account deactivation synchronization, durable administrative audit, rate limits/quotas, production proxy/monitoring/backup/restore procedures, Capture conversion, and D-08 delivery receipts/equality/replay remain outside this change. Human security review is pending.
+
+## 2026-10-20T15:52:41+05:30 — Clarify producer-qualified candidate identity
+
+- Changed: Marked the older `(project, candidate_id)` uniqueness and generic replay wording in `docs/evidence-linked-memory-contract.md` as a superseded prototype assumption, and distinguished v0.3 revision-scoped conversion retry behavior from unresolved D-08 delivery/revision payload equality.
+- Why: Prevent the historical prototype table from appearing to override the authoritative producer-qualified identity contract.
+- Validation: Compared the wording with `docs/SHARED_MEMORY_INTERFACE_CONTRACT_V0.3_DECISIONS.md`; `git diff --check` passed.
+- Limitations: D-08 delivery/revision payload-equality details remain unresolved. No code, schema, migration, or runtime behavior changed.
+
+## 2026-10-19T18:22:59+05:30 — Add opt-in live PostgreSQL Evidence tests
+
+- Changed: Added seven opt-in PostgreSQL integration cases for migrations 0005–0006, Evidence/Knowledge round-trips, attachment idempotency, verification updates, supersession, project isolation, authorization denial, forced RLS, database constraints, savepoint recovery, and outer rollback. Reused the existing fresh-disposable-target fixture and request-bound authorization/UoW. Clarified skip reasons and corrected stale adapter/schema status documentation.
+- Why: Exercise the current Evidence adapter and migrations against real PostgreSQL when an explicitly configured safe target is available, without creating another database setup path or implying Capture conversion/runtime integration.
+- Validation: Python 3.13.9 / pytest 8.4.2, focused offline command — 92 passed, 7 live tests skipped. The live module was also collected with skip reasons — 7 skipped because the opt-in flag and approved target are not configured. Changed Python modules compiled; `git diff --check` and cached diff check passed.
+- Limitations: No PostgreSQL target variables were configured, so the live fixture was not enabled and no connection or migration ran. The live cases and server-side SQL behavior remain unverified. The test authenticator is synthetic and does not verify real transport credentials; hosted MCP remains disabled.
+
+## 2026-10-19T11:30:35+05:30 — Add shared-memory PostgreSQL schema foundation
+
+- Changed: Added migration `0006_candidate_revision_store.sql` with project-scoped producer/source namespace and candidate identities, sequential immutable candidate revisions, append-only review events, candidate evidence records, ordered duplicate-preserving occurrence links, and a conversion-ledger relationship to existing knowledge. Added row-level project/workspace policies and set their transaction-local scope from the authorized request unit of work. Added static migration-definition assertions and scripted UoW scope tests; updated migration documentation.
+- Why: Establish relational constraints for the approved candidate/revision and occurrence model while keeping delivery replay out until its separate equality profile is defined.
+- Validation: `python -m pytest -p no:cacheprovider -o addopts='' tests/postgres/test_request_unit_of_work.py tests/postgres/test_migration_runner.py tests/postgres/test_hosted_authorization.py tests/postgres/test_hosted_identity_boundary.py tests/evidence/test_postgres_store.py tests/evidence/test_service.py tests/capture/test_pipeline.py tests/test_hosted_scope.py` — 156 passed. `python -m py_compile src/orbit/postgres/unit_of_work.py tests/postgres/test_request_unit_of_work.py tests/postgres/test_migration_runner.py`, `git diff --check`, and `git diff --cached --check` passed.
+- Limitations: The D-08 delivery/revision equality projection/profile remains unresolved, so no delivery receipt, delivery-ID uniqueness, or replay implementation was added. No candidate ingress/conversion service, normalized conflict-edge/pending-endpoint graph, or audit-event storage is implemented. Migration SQL has not been run or validated against PostgreSQL; no database or Neon resource was contacted. MCP remains SQLite-backed.
+
+## 2026-10-19T11:16:13+05:30 — Add request-bound PostgreSQL Evidence/Knowledge persistence
+
+- Changed: Implemented the current manual `EvidenceLinkedMemoryStore` contract in a PostgreSQL adapter, added its additive migration, and exposed it through the authorized request unit of work using the resolver-issued project scope and borrowed connection. Added scripted tests for round-trip fields, project isolation, atomic create/supersede, idempotent evidence attachment, rollback, and transaction sharing.
+- Why: Establish a durable adapter boundary for existing Evidence/Knowledge operations without inventing producer delivery/revision semantics or wiring incomplete hosted functionality into MCP.
+- Validation: Focused Evidence/UoW/migration tests — 72 passed; broader Evidence/Capture/hosted authorization/Retrieval/MCP regression set — 214 passed; changed Python files compiled; `git diff --check` and `git diff --cached --check` passed.
+- Limitations: Tests use scripted connections only; PostgreSQL syntax and live transaction/concurrency behavior were not verified against a server. Migration `0005` is not applied. The MCP runtime remains SQLite-backed. Capture occurrence persistence, candidate approval/revision, delivery retry, conversion, shared-memory retrieval, and authenticated hosted runtime integration remain unimplemented.
+
+## 2026-10-19T10:30:03+05:30 — Add default-deny hosted memory capabilities
+
+- Changed: Extended hosted project access records and scope resolution with `candidate:approve`, `memory:convert`, `memory:history`, and `audit:read`; approval is limited to active human project members. Added migration `0004_memory_capabilities.sql`, with new human and service grants defaulting to false, updated scripted authorization and migration tests, and documented the migration.
+- Why: The approved v0.3 workflow requires separate project capabilities; the existing hosted grants only represented generic read/write access.
+- Validation: Baseline hosted authorization/identity/request-UoW/migration tests — 48 passed. After the change, `python -m pytest -p no:cacheprovider -o addopts='' tests/postgres/test_hosted_authorization.py tests/postgres/test_hosted_identity_boundary.py tests/postgres/test_request_unit_of_work.py tests/postgres/test_migration_runner.py tests/test_hosted_scope.py` — 68 passed; `python -m pytest -p no:cacheprovider -o addopts='' tests/test_mcp_tools.py tests/test_mcp_protocol.py tests/test_mcp_persistence.py tests/test_mcp_end_to_end.py tests/test_mcp_authorization.py tests/integration/test_capability_flow.py tests/capture/test_pipeline.py tests/evidence/test_service.py` — 122 passed; `python -m py_compile src/orbit/mcp_server/hosted_scope.py src/orbit/postgres/authorization.py tests/postgres/test_hosted_authorization.py tests/postgres/test_request_unit_of_work.py tests/postgres/test_migration_runner.py tests/test_hosted_scope.py`, `git diff --check`, and `git diff --cached --check` passed. No live database, migration, or Neon commands were run.
+- Limitations: This does not implement a credential verifier, Evidence/Knowledge tables or adapter, conversion/replay, retrieval from shared knowledge, or hosted MCP wiring. The new migration is not applied and the hosted schema remains a draft. The existing canonicalization suite was attempted but could not collect because `rfc8785` is missing from the active interpreter; no package was installed.
+
+## 2026-10-19T10:03:44+05:30 — Prototype lossless Capture occurrences
+
+- Changed: Added an internal typed occurrence record to CaptureResult and emitted one ordered entry per accepted extracted event, preserving duplicate events and their input evidence references independently from deduplicated candidate evidence. Exported the additive Capture model and added focused regression tests.
+- Why: Keep local Capture order and multiplicity observable while retaining the existing candidate identity, candidate merge, and evidence deduplication behavior. The per-call ordinal is not a producer-issued or durable ID.
+- Validation: `python -m pytest -p no:cacheprovider -o addopts='' tests/capture/test_pipeline.py tests/integration/test_capability_flow.py tests/evidence/test_service.py` — 84 passed; `python -m py_compile src/orbit/capture/model.py src/orbit/capture/service.py src/orbit/capture/__init__.py tests/capture/test_pipeline.py` — passed; `git diff --check` and `git diff --cached --check` — passed.
+- Limitations: This is an in-memory Capture prototype only. It does not provide stable producer occurrence IDs, durable occurrence/evidence association IDs, serialization, conversion persistence, Resurrection conformance, or live database behavior.
+
+## 2026-10-19T09:51:21+05:30 — Prepare delivery contract owner decision packet
+
+- Changed: Added `docs/delivery-contract-owner-decision-packet.md` with role-level questions for the unapproved delivery/producer extensions, dependencies, hypothetical flow, persistence gate, and canonicalization verification steps. Updated this record and `AI_USAGE.md`.
+- Why: Obtain explicit producer, product/security, and storage decisions before durable delivery persistence; preserve the requester-authorized v0.3 baseline without claiming teammate approval.
+- Validation: Repository/source inspection, focused canonicalization test attempt, Markdown/link review, and diff whitespace checks; exact results are recorded in the task report and AI usage entry.
+- Limitations: Canonicalization tests could not collect because the active Python 3.13.9 environment lacks `rfc8785`; no dependency was installed. Cross-runtime vectors and all owner decisions remain unverified/open.
+
+## 2026-10-19T03:10:08+05:30 — Add Evidence store conformance tests
+
+- Changed: Added a reusable conformance mixin for the current
+  `EvidenceLinkedMemoryStore` protocol and applied it to the in-memory reference
+  fake. It covers represented round-trip fields, project-scoped operations,
+  atomic staged-failure behavior, supersession, idempotent attachment, and
+  missing-record behavior.
+- Why: Give future store implementations a shared offline contract suite without
+  implying that a fake proves database transaction or durability behavior.
+- Validation: `python -m pytest -p no:cacheprovider -o addopts='' tests/evidence/test_service.py`
+  passed: 40 tests (Python 3.13.9, pytest 8.4.2).
+- Limitations: This is fake-store contract coverage only. No PostgreSQL adapter,
+  schema, or live-database behavior was tested.
+
+## 2026-10-19T03:10:08+05:30 — Test process-level SQLite migration concurrency
+
+- Changed: Added a bounded process-level test that starts two independent
+  spawned processes against one fresh temporary SQLite file, then verifies
+  migration version, expected schema objects, database integrity, and foreign
+  key integrity.
+- Why: The prior concurrency coverage exercised threads; separate processes
+  verify SQLite's file-lock behavior across independent initializers.
+- Validation: `python -m pytest -p no:cacheprovider -o addopts='' tests/database/test_engine.py`
+  passed: 9 tests (Python 3.13.9, pytest 8.4.2).
+- Limitations: No production migration behavior changed. The test covers a local
+  temporary database only.
+
+## 2026-10-19T03:03:17+05:30 — Audit delivery identity contract readiness
+
+- Changed: Added `docs/delivery-contract-decision-audit.md` with a traceable
+  D-01–D-13 comparison, separated settled v0.3 requirements from pending
+  delivery/producer extensions, documented dependencies, verification limits,
+  and an owner questionnaire.
+- Why: Avoid implementing delivery persistence from proposal details that the
+  requester-authorized conversion baseline does not settle or the local Capture
+  prototype cannot demonstrate.
+- Validation: Inspected the current decision record, proposal, historical
+  boundary/draft documents, Capture/Evidence code and tests, and project test
+  setup. `git diff --check` and focused documentation link/whitespace checks
+  are recorded in the final report. The focused canonicalization test was
+  attempted and could not collect because `rfc8785` is unavailable in the
+  current interpreter.
+- Limitations: No team owner response or upstream producer implementation was
+  available in the checkout. No schema, application, test, dependency, or
+  database change was made; no test pass is claimed.
+
+## 2026-10-19T02:56:52+05:30 — Add proposed delivery identity vectors
+
+- Changed: Added explicit non-normative delivery and candidate-revision digest
+  examples covering exact retry, changed content, omitted versus null fields,
+  Unicode normalization, equivalent timestamp offsets, and rejected timestamp
+  edge cases. Clarified the limits of the digest verification environment.
+- Why: Make the pending delivery-equality proposal reviewable without treating
+  it as an approved contract or changing the final decision record.
+- Validation: Re-derived the restricted example digests with Python's
+  standard-library JSON encoder and checked links/whitespace plus
+  `git diff --check`; this was not a test or general JCS implementation check.
+- Limitations: `rfc8785` is not importable from the default Python or repository
+  validation environment in this continuation; no second runtime was used.
+
+## 2026-10-19T02:54:13+05:30 — Propose delivery and producer identity boundary
+
+- Changed: Added a source-grounded, unapproved delivery/producer contract
+  proposal with separate delivery, candidate, revision, conversion, and digest
+  identities; retry rules; illustrative vectors; producer/source lifecycle;
+  canonicalization edge policies; and future acceptance tests. Corrected stale
+  implementation-status descriptions in the two historical v0.3 review drafts.
+- Why: The approved conversion profile does not define delivery equality, and
+  the Capture prototype lacks producer, delivery, and immutable revision IDs.
+- Validation: Local relative Markdown links and whitespace checked in five
+  documentation/log files; `git diff --check` and `git diff --cached --check`
+  passed. No tests or database commands ran.
+- Limitations: All additional delivery, revision-equality, timestamp-edge,
+  comparator, certainty-mapping, and producer-lifecycle rules remain proposals
+  pending the relevant owner responses. The final decision record was unchanged.
+
+## 2026-10-19T02:39:40+05:30 — Conform conversion hashing to the v0.3 contract
+
+- Changed: Replaced the provisional conversion JSON encoding with RFC 8785 JCS,
+  implemented the approved payload version, NFC and UTC timestamp normalization,
+  exact payload validation, ordered occurrences, sorted conflicts, and direct
+  lowercase-hex SHA-256. Added the bounded `rfc8785` runtime dependency and fixed
+  tests for both decision-record vectors. Updated README dependency/runtime notes.
+- Why: Conversion replay comparison must use the canonical bytes and digest
+  selected by the final shared-memory decision record.
+- Validation: Canonicalization tests: 41 passed; Evidence suite: 81 passed;
+  Capture mapping tests: 8 passed, 27 deselected. Both changed Python files
+  compiled; `git diff --check` and `git diff --cached --check` passed. Tests used
+  `rfc8785` 0.1.4 installed into a temporary target directory.
+- Limitations: Delivery retry equality remains undefined and is not implemented.
+  Inputs with more than six timestamp fractional digits are rejected rather than
+  rounded or truncated because that policy is unspecified. No producer integration
+  or persistence behavior was added.
+
+## 2026-10-19T02:27:26+05:30 — Establish shared-memory v0.3 decision baseline
+
+- Changed: Added the final v0.3 decision record and Resurrection boundary review
+  from the verified `origin/retrival` ref. Marked the local v0.3 contract and
+  decision request as historical where the final record supersedes them.
+- Why: Establish one implementation baseline without merging retrieval history
+  or importing its virtual environment and generated artifacts.
+- Validation: Compared both imported documents to their source Git blobs;
+  reviewed the reconciliation diff and `git diff --check`.
+- Limitations: No tests, database commands, migrations, or implementation
+  changes ran. The provisional canonicalization helper does not match the
+  JCS/hash profile selected in the decision record and remains unchanged for a
+  separate task.
+
+## 2026-10-18T20:26:33+05:30 — Review shared-memory storage decisions
+
+- Changed: Recorded `NEED DISCUSSION` technical dispositions for ST-01,
+  ST-02, and ST-03 in the decision review. Producer and Product/Security
+  response fields remain unanswered; no proposal is marked approved.
+- Why: Canonicalization, conversion identity, and the transaction boundary
+  depend on producer and security decisions that are still unresolved.
+- Validation: Reviewed the current decision register; document whitespace and
+  `git diff --check` passed. No tests or database commands ran.
+- Limitations: The repository does not identify an accountable storage owner.
+  Codex's dispositions are technical input, not owner sign-off. Orbit context
+  retrieval for project `celestin` returned `ACCESS_DENIED`; no alternate
+  project was tried.
+
+## 2026-10-18T14:40:07+05:30 — Make SQLite schema migrations atomic
+
+- Changed: Replaced migration script strings with ordered complete-statement
+  tuples, executed each statement inside an explicit `BEGIN IMMEDIATE`
+  transaction, rechecked `user_version` after acquiring the write lock, and
+  committed the schema changes and version together. Migration failures now
+  roll back and close the connection opened by `connect()`.
+- Why: Python SQLite `executescript()` can implicitly commit an open
+  transaction, and concurrent initializers need a locked version recheck.
+- Validation: The focused database, FTS retrieval, persistence, and MCP
+  regression command passed: 92 tests. `py_compile` and `git diff --check`
+  passed.
+- Limitations: Tests used temporary SQLite files; the full suite and all live
+  PostgreSQL behavior were not tested.
+
+## 2026-10-17T14:30:21+05:30 — Align merged MCP regression with runtime handlers
+
+- Changed: Updated the adversarial retrieved-message regression to invoke the
+  per-runtime `MCPToolHandlers` instance instead of removed module-level tool
+  functions.
+- Why: The incoming test was written against the pre-composition server API;
+  retaining the scenario while using the supported runtime seam preserves the
+  test's security assertion and current MCP design.
+- Validation: Corrected MCP regression: 1 passed. Full suite after merge:
+  567 passed, 38 skipped. `git diff --cached --check` and `git diff --check`
+  passed. No live PostgreSQL tests were run.
+- Limitations: No live PostgreSQL tests are part of this local regression run.
+
+## 2026-10-17T14:18:41+05:30 — Add hosted PostgreSQL runtime audit
+
+- Changed: Added the dated read-only architecture audit at
+  `docs/hosted-postgres-runtime-audit.md`.
+- Why: Preserve the reviewed runtime, storage, authorization, migration, and
+  integration gaps as a handoff reference; the report describes its 2026-10-16
+  repository snapshot and does not claim hosted runtime readiness.
+- Validation: Reviewed the report and confirmed it is the only pre-existing
+  untracked path. No tests were run; no database or Neon resources were
+  accessed.
+- Limitations: The audit is historical and should be read with current source
+  before making implementation decisions.
+
+## 2026-10-17T14:10:10+05:30 — Cover dangling conflict links in reconstruction
+
+- Changed: Added a fake-backed project-state regression for a loaded knowledge record whose capture conflict points to a candidate absent from the returned records. It checks unresolved conflict classification, no fabricated counterpart, preserved capture-source/evidence provenance, unknown applicability, and no selected winner. Existing pinned-revision and read-only tests were left unchanged; no production or shared interface changed.
+- Why: Make reconstruction behavior explicit for incomplete knowledge results without treating omission from `list_records()` as confirmed absence or conflating candidate and knowledge IDs.
+- Validation: The focused new test passed (1 passed); `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m pytest -p no:cacheprovider -o addopts='' tests/project_state/test_reconstructor.py` — 21 passed. Python 3.12.3 and pytest 7.4.4; the test uses a fake knowledge source and a temporary Git repository. `git diff --check` passed.
+- Limitations: The read-only source protocol has no completeness or endpoint-status signal, so it cannot distinguish a temporarily unavailable counterpart from a confirmed absent one. These tests do not establish persistence, adapter behavior, or runtime integration.
+
+## 2026-10-17T14:04:30+05:30 — Test evidence availability and verification separation
+
+- Changed: Added a fake-backed Evidence service regression for a source changing from `available` to `missing` at read time. It checks that read-time resolution does not mutate the stored reference and remains separate from knowledge/evidence verification, including an explicit `stale` knowledge status. No production code or shared interface changed.
+- Why: Make source availability, read-time refresh behavior, and claim verification distinctions executable without implying that an available source proves a claim.
+- Validation: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m pytest -p no:cacheprovider -o addopts='' tests/evidence/test_service.py::test_read_time_missing_source_status_is_separate_from_verification` — 1 passed; the same command targeting `tests/evidence/test_service.py` — 33 passed. System `python` was unavailable; system `python3` required `PYTHONPATH=src` because the checkout has no editable install or `.venv`. `git diff --check` passed.
+- Limitations: These tests use an in-memory fake store and resolver. They do not verify durable persistence, adapter behavior, trusted capture approval, or end-to-end runtime integration.
+
+## 2026-10-17T13:07:42+05:30 — Narrow hosted PostgreSQL request entry points
+
+- Changed: Made PostgreSQL transaction and request-executor methods internal,
+  restricted request UoW creation to its internal binder, hid its session and
+  scope fields from the handler-facing API, and separated request-bound adapter
+  factories from retained standalone adapter constructors. Added offline tests
+  that exercise the request boundary and verify missing authentication cannot
+  open a connection.
+- Why: Keep normal hosted application composition on the authenticated request
+  boundary and prevent accidental substitution of standalone adapters while
+  preserving the standalone adapter API for trusted tooling and tests.
+- Validation: Hosted identity/UoW/authorization/storage/retrieval tests — 59
+  passed; hosted-scope, MCP, and SQLite persistence regressions — 85 passed.
+  Python compilation and diff checks passed.
+- Limitations: Python code in the same process remains trusted and can call
+  underscored internals or open its own connection. No credential verifier,
+  workspace-binding provider, hosted MCP wiring, or live PostgreSQL test exists.
+
+## 2026-10-17T12:57:13+05:30 — Define a fail-closed hosted identity boundary
+
+- Changed: Added the `PrincipalAuthenticator` contract and
+  `HostedRequestBoundary`, which accepts transport context, requires explicit
+  identity/workspace/request dependencies, and delegates to the existing
+  authorized request unit of work. Added offline fail-closed tests and clarified
+  the current implementation limits in hosted identity documentation.
+- Why: Establish a narrow composition seam without selecting an identity
+  provider, trusting caller-supplied identity/workspace fields, or enabling
+  hosted MCP requests.
+- Validation: Offline identity boundary, hosted scope, request UoW,
+  authorization, MCP, and SQLite persistence regression command: 110 passed.
+  Changed Python modules passed `py_compile`; `git diff --check` passed.
+- Limitations: No credential verification implementation, concrete workspace
+  binding, hosted MCP wiring, database access, or live authentication testing.
+
+## 2026-10-17T12:00:40+05:30 — Bind PostgreSQL adapters to an authorized request unit of work
+
+- Changed: Added request-bound constructors for PostgreSQL persistence and
+  retrieval adapters, plus `PostgresRequestUnitOfWork` and
+  `execute_authorized_request` to compose them over the authorization session's
+  connection. Updated the hosted identity/scope documentation.
+- Why: Ensure hosted authorization checks, source validation, memory operations,
+  and retrieval can share one request transaction without adapters acquiring or
+  finalizing separate connections.
+- Validation: Request UoW plus hosted authorization, PostgreSQL storage, and
+  PostgreSQL retrieval tests: 48 passed. SQLite/MCP/hosted-scope and retrieval
+  regression command: 241 passed, 6 skipped. Changed Python modules compiled;
+  `git diff --check` and `git diff --cached --check` passed.
+- Limitations: No authentication provider or MCP hosted runtime integration was
+  added. No PostgreSQL/Neon connection or live SQL validation was performed.
+
+## 2026-10-17T09:25:29+05:30 — Add isolated PostgreSQL retrieval adapter
+
+- Changed: Added a `RetrievalData` implementation with explicit workspace/project
+  scope, authoritative decision reloads, archive filters, deterministic
+  PostgreSQL full-text search, and normalized IDs/timestamps. Added migration
+  `0003_retrieval_search_indexes.sql` with partial GIN expression indexes.
+- Why: Prepare PostgreSQL retrieval behind the existing data port without
+  enabling hosted requests or changing SQLite runtime behavior.
+- Validation: Focused adapter, SQLite retrieval/data-port, and migration-runner
+  tests: 72 passed; retrieval suite: 164 passed, 6 skipped; non-live PostgreSQL
+  suite: 82 passed, 18 skipped; MCP regression tests: 44 passed; full suite:
+  491 passed, 38 skipped. Compilation and both diff checks passed.
+- Limitations: No database or Neon operation was performed. Live PostgreSQL
+  query, index use, and retrieval parity remain unverified.
+
+## 2026-10-16T23:11:03+05:30 — Add explicit MCP runtime composition
+
+- Changed: Added `build_runtime`, `ServerRuntime`, bound `MCPToolHandlers`, and `create_mcp_server`; documented the SQLite-only composition boundary. Updated runtime, authorization, persistence, and command-alias tests for instance-scoped dependencies.
+- Why: Make service wiring testable without module-global backends while keeping local SQLite, process-level authorization, stdio, and public MCP contracts intact.
+- Validation: Focused MCP runtime/protocol/persistence/authorization tests: 44 passed. Full suite: 473 passed, 38 skipped. Changed Python modules passed `py_compile`; `git diff --check` passed.
+- Limitations: Hosted PostgreSQL/Neon is not selectable in the MCP runtime; no database or Neon operation was performed.
+
+## 2026-10-16T21:39:29+05:30 — Add optional Capability 1 knowledge state to Retrieval
+
+- Changed: Added a version 1 optional `knowledge_state` envelope, an explicit fakeable Retrieval reader seam, lossless mapping of existing knowledge/evidence/capture provenance, project checks, and context JSONL/budget integration. Added focused tests and documented the missing production read interface. Ranking, filtering, storage contracts, and MCP handlers were not changed.
+- Why: Make Capability 1 verification, evidence, and provenance available alongside existing Retrieval context without treating decision approval as verification or fabricating links.
+- Validation: Focused state/context/service suite: 38 passed in 0.41s. Final related suites: Retrieval 163 passed, 6 skipped (1.98s); Evidence 32 passed (0.08s); Capture 35 passed (0.14s); project-state 20 passed (0.84s); Capability-flow integration 7 passed (0.30s). `git diff --check` passed. Repository-wide collection was blocked with 15 skipped and 6 errors: five MCP test modules could not import the missing `mcp` package, and `tests/sync/test_service.py` conflicted with the same-named Evidence test under default import mode. The attempted combined importlib-mode run also could not import `tests/retrieval/test_fts.py`'s `fixtures` helper.
+- Limitations: No production Capability 1 reader or adapter exists; production persistence remains blocked by the missing project-scoped candidate-to-knowledge read interface. The MCP adapter does not configure the optional seam.
+
+## 2026-10-16T20:16:00+05:30 — Require an approved target for schema validation
+
+- Changed: Removed the fixed `celestin_schema_test_v2` target from the hosted-schema validator. It now requires an operator-supplied target to match the connected database, the disposable test naming pattern, the loopback endpoint, and the retired-target rejection list. Documented that no replacement database is approved in the repository. Reworked the reconstructor symlink fixture to create an explicit Git mode-120000 blob, preserving the security assertion without requiring Windows symlink privilege.
+- Why: The prior example pointed to a retired database and could encourage reuse; an operator-selected database name must not be mistaken for approval or freshness.
+- Validation: PostgreSQL support tests: 51 passed. The reconstructor tests passed 17/17 after the fixture was changed to write and assert a mode-120000 Git tree entry, avoiding the Windows `WinError 1314` OS-symlink restriction without weakening the blob assertion. Changed Python files passed `py_compile`; `git diff --check` and `git diff --cached --check` passed. No SQL script, live test, database connection, migration, or Neon request was run.
+- Limitations: SQL guard execution against PostgreSQL remains unverified. A database owner must separately approve and provision a new disposable target before the validator can be used.
+
+## 2026-10-16T19:24:02+05:30 — Restore PostgreSQL test safeguards
+
+- Changed: Restored explicit tracked-cursor cleanup and regression tests; corrected the live fixture's workspace-scoped legacy project keys; restored retired-target checks and added the 2026-10-15 one-run database; pinned the project Neon MCP URL and documented retired targets.
+- Why: The staged integration snapshot had removed protections needed for deterministic fixture setup, resource cleanup, and preventing reuse of PostgreSQL test databases.
+- Validation: `python -m pytest -p no:cacheprovider -o "addopts=" tests/postgres/test_live_support.py` — 50 passed using global Python 3.13.9 because this checkout has no project validation venv. `git diff --check` and `git diff --cached --check` passed. No PostgreSQL connection, live test, migration, or Neon request was made.
+- Limitations: Live PostgreSQL behavior was not tested. Changes are intentionally left unstaged to preserve the pre-existing index snapshot.
+
+## 2026-10-16T14:31:22+05:30 — Reconcile team build context and current project documentation
+
+- Changed: Merged the team branch and reconciled the PRD, TRD, application flow, design principles, README, and database model with the supplied team context and current implementation details. Added BUILD_KICKOFF.md with a clear note that its audit observations are historical. Preserved the upstream source and test changes.
+- Why: Integrate the team's Resurrection Layer context without replacing local MCP setup guidance or presenting planned integration as verified behavior.
+- Validation: Pending local documentation and regression checks.
+- Limitations: Team handoff audit observations require verification against the merged code; this documentation reconciliation does not change application behavior.
+
 ## 2026-10-16T14:09:31+05:30 — Add project-scoped Neon developer tooling
 
 - Changed: Installed the Neon and Neon PostgreSQL agent skills in `.agents/skills/`, added `.codex/config.toml` for the Neon OAuth MCP server pinned to the existing `celestin-dev` project, and documented the optional developer connection in the README.
 - Why: Make Neon project inspection available in this checkout without creating cloud resources or selecting Neon as Celestin's application database.
 - Validation: Neon CLI authentication and read-only project, branch, database, region, and Postgres-version metadata checks succeeded. `git diff --check` and `git diff --cached --check` passed. MCP tool connectivity was not yet available in the active Codex session; it requires reopening the project and completing first-use OAuth if prompted. No database connection or migration was run.
 - Limitations: The MCP OAuth handshake has not completed in this session. The PostgreSQL adapter remains unselected by the MCP server, and retrieval remains SQLite-backed.
+
+## 2026-10-16T13:58:26+05:30 — Add project-scoped Neon agent tooling
+
+- Changed: Added the Neon, Neon Postgres, and Neon Object Storage agent skills under `.agents/skills/`; configured the project Codex Neon MCP server using OAuth in `.codex/config.toml`; added the skill source lock file and README setup notes.
+- Why: Make official Neon guidance and project-scoped Neon management tools available to contributors without storing an API key in the repository.
+- Validation: Confirmed the skills CLI lists all three Neon skills at project scope and verified the generated Codex MCP entry contains only the Neon MCP URL. `git diff --check` was run after documentation updates.
+- Limitations: The Neon CLI `skills` wrapper could not run with installed Node.js 22.18.0 (it requires 22.20+) and then reported that its external `skills` executable was unavailable. Used Neon's documented `npx skills add` fallback. Neon MCP OAuth sign-in must be completed by each Codex user on first use. No Neon project was linked or deployed; Celestin remains SQLite-backed.
+
+## 2026-10-16T09:05:44+05:30 — Add Celestin product and build documents
+
+- Changed: Added `PRD.md`, `TRD.md`, `App_flow.md`, `Design.md`, and `database_schema.md`; added a documentation index to `README.md` and recorded this contribution in `AI_USAGE.md`.
+- Why: Give the team a consistent, implementation-grounded product, technical, interaction-flow, design, and schema handoff.
+- Validation: Reviewed the docs against the checked-out README, MCP server, SQLite engine/repositories, and hosted schema draft; local Markdown links and `git diff --check` passed. No application tests were run for this documentation-only change.
+- Limitations: The Orbit memory lookup for project `celestin` returned `ACCESS_DENIED`; no alternate project was queried. The docs describe the local MCP implementation and label the hosted PostgreSQL schema as draft/planning only. No runtime code or database was changed.
+
+## 2026-10-15T23:34:46+05:30 — Preserve linked conflicts and stale status in reconstruction
+
+- Changed: Project-state reconstruction now classifies saved knowledge marked stale as stale and uses capture-provenance conflict links to mark both available candidate endpoints as unresolved conflicts without mutating stored records. Added regression tests and clarified the behavior and retrieval integration gap in `docs/project-state-reconstruction.md`.
+- Why: Reconstruction previously ignored Capability 3 conflict links and could downgrade a saved stale knowledge status to unverified when its source path existed.
+- Validation: Baseline affected suite: 353 passed, 5 errors, 1 warning. The five errors are the known `DecisionRepository` `NameError` in `tests/retrieval/test_strategies.py`. Post-change project-state tests: 20 passed. Affected capture/evidence/project-state/sync/integration/retrieval (excluding that known failing module)/MCP-handler suite: 355 passed, 1 warning. `git diff --check` passed.
+- Limitations: Legacy retrieval does not consume Capability 1 knowledge and its DTO has no verification, freshness, or conflict metadata. The MCP stdio timeout was not part of this focused baseline.
 
 ## 2026-10-15T22:06:50+05:30 — Block previously used PostgreSQL test targets
 
@@ -31,6 +441,27 @@ Record each meaningful project change during the event, newest first. Update thi
 - Why: Live integration assertions intentionally verify both connection and cursor cleanup; Psycopg connection closure alone does not satisfy the tracked cursor checks.
 - Validation: `tests/postgres/test_live_support.py` — 47 passed; complete `tests/postgres` suite — 78 passed, 18 skipped; `git diff --check` passed. No PostgreSQL connection or live test was run.
 - Limitations: Scripted tests verify the tracking helper’s behavior; this change does not independently establish live Psycopg/PostgreSQL behavior.
+
+## 2026-10-15T21:27:22+05:30 — Document retrieval content trust boundary
+
+- Changed: Added adversarial-content and status-semantics tests for context JSON serialization and the MCP retrieval handler. Documented that retrieved content is untrusted project data, decision approval is not verification, Capability 1 stale/conflict metadata is not present in the current retrieval contract, and the MCP item array inherits project scope from its response envelope. No retrieval ranking, MCP handler, model, or reranking implementation changed.
+- Why: Retrieved messages and excerpts are returned to clients as source content, but the repository has no downstream coding-agent prompt assembler to enforce trust semantics.
+- Validation: Baseline focused retrieval/MCP/PageIndex suite: 92 passed, 1 warning. Final focused suite: 98 passed, 1 warning. Broader capture/evidence/project-state/sync/integration/retrieval/MCP-handler/PageIndex suite: 215 passed, 1 warning. The isolated stdio protocol test exceeded a 20-second timeout; cause not established. `git diff --check` passed.
+- Limitations: Tests verify serialization and status separation, not model compliance. A consuming-client injection test remains necessary. PageIndex sends document outline snippets in its navigation prompt; replies are restricted to known section references, but prompt injection can still affect which valid same-project section is selected.
+
+## 2026-10-15T20:34:33+05:30 — Reauthorize Resurrection Layer service operations
+
+- Changed: Evidence and synchronization services now treat `AuthorizedProject` as a project/action selector and re-check every operation through an injected `ProjectAuthorizer` using a principal fixed at trusted service construction. Added regressions for caller-constructed scopes, cross-project access, and stable service-principal use. Strengthened the MCP tool registration test to assert that Capabilities 1–4 remain internal-only. Documented the remaining repository-root binding limitation.
+- Why: `AuthorizedProject` is a publicly constructible dataclass and its presence alone cannot establish trusted authorization. Project-state reconstruction also accepts an explicit root with no project-to-repository resolver.
+- Validation: Pre-change selected baseline passed with `--import-mode=importlib` (the repository's default pytest mode failed collection because `tests/evidence/test_service.py` and `tests/sync/test_service.py` share the same module basename). Final targeted suite: 106 passed, 6 subtests passed. Broader capture/evidence/project-state/sync/integration/auth/storage suite: 195 passed, 15 subtests passed. `git diff --check` passed.
+- Limitations: This adds domain reauthorization only when a trusted caller configures the authorizer and pins the principal. It does not authenticate transports. Resurrection capabilities remain unexposed through MCP. Reconstruction needs an application-owned authorized project-to-repository resolver before external exposure; current path and symlink checks are not project authorization.
+
+## 2026-10-15T19:37:01+05:30 — Keep reviewed capture candidates immutable
+
+- Changed: Terminal approved/rejected candidates now remain unchanged on exact retries; additional source/evidence or changed claim surface/certainty under the same normalized identity is reported as suppressed. Different claims or conflict keys remain new pending identities. New conflict candidates can link to terminal claims without backfilling the terminal record's conflict history. Added focused regression tests and clarified the capture contract.
+- Why: Recapture previously merged provenance into an approved or rejected candidate without review, and conflict discovery could update terminal conflict links.
+- Validation: Baseline capture suite: 29 passed. Focused post-change capture suite: 35 passed. Capture/evidence/project-state/sync/integration suite: 113 passed. `git diff --check` passed. No full suite or persistence integration was run.
+- Limitations: The review queue remains in-memory; suppressed new information is not retained as candidate knowledge. Conflict links from new candidates to terminal records are intentionally one-way to preserve the terminal record.
 
 ## 2026-10-15T17:24:52+05:30 — Prepare safe PostgreSQL live-test preflight
 
@@ -67,6 +498,13 @@ Record each meaningful project change during the event, newest first. Update thi
 - Validation: Focused runner tests: 13 passed. Complete non-live PostgreSQL subset: 54 passed. Full suite: 335 passed, 38 skipped. `git diff --check` passed. No live database connection or SQL was run for this fix.
 - Limitations: Scripted tests do not verify the catalog query against PostgreSQL. The failed target was not inspected and may contain an empty ledger; a database owner must provision a new disposable database before another initialization attempt.
 
+## 2026-10-15T11:08:45+05:30 — Return consistent same-batch capture results
+
+- Changed: Refresh accepted capture candidates from the review repository after processing the complete input batch, so returned source merges and conflict links match the saved queue state. Added a unit regression and updated the cross-capability assertion and capture contract documentation.
+- Why: A later candidate in one structured input could add reciprocal conflict links to an earlier candidate, while the earlier object in `CaptureResult` remained stale.
+- Validation: Before implementation, the Resurrection Layer baseline passed 106 tests. The new regression failed against the old behavior. After the fix, the capability suite passed 107 tests; the capability plus authorization/storage regression suite passed 160 tests and 12 subtests. Broad suite excluding known broken retrieval setup and stdio tests: 544 passed, 2 skipped, 1 deselected, 15 subtests passed. `git diff --check` passed.
+- Limitations: Five tests in `tests/retrieval/test_strategies.py` still fail during setup with `NameError: DecisionRepository`; the PageIndex-enabled stdio test timed out after 35 seconds without output. The broad run excluded that retrieval module and stdio tests. No shared-memory or production persistence behavior was validated.
+
 ## 2026-10-15T11:05:36+05:30 — Reject unsafe PostgreSQL test DSNs
 
 - Changed: Replaced driver-normalized DSN parsing with strict validation for exactly four password-free target parameters; added tests for credentials, extra and duplicate parameters, malformed syntax, and target mismatches; documented the accepted form and Windows password-file handling.
@@ -87,6 +525,34 @@ Record each meaningful project change during the event, newest first. Update thi
 - Why: Give the team a concrete storage contract to ratify before the persistence owner designs an additive PostgreSQL migration.
 - Validation: Read-only comparison against the current hosted baseline, `MemoryStore`, and `PostgresMemoryStore`; `git diff --check` passed. No tests or database operations were run.
 - Limitations: The referenced Resurrection Layer contract was not present in the local worktree or Git history, so field-level reconciliation remains pending. All semantics in the new document are proposals, not approved schema decisions.
+
+## 2026-10-15T09:03:58+05:30 — Preserve capture provenance through knowledge reconstruction
+
+- Changed: Added optional `CaptureKnowledgeProvenance` to `KnowledgeRecord`, a capture conversion helper and explicit category mapping; validated project, approved/unverified state, and source-to-evidence association. Capability 2 now returns capture provenance, knowledge/evidence record IDs, evidence resolution/verification/checker fields, and lifecycle/supersession fields. Updated contract documentation and integration tests.
+- Why: Approved capture metadata was discarded at the Capability 3→1 boundary and reconstructed findings lost generated IDs, checker assertions, evidence statuses, and explicit supersession links.
+- Validation: Baseline affected suite before edits — 123 passed, 12 subtests passed. Focused capture/evidence/reconstruction/integration suite after edits — 83 passed. Affected suite with authorization and storage regressions — 136 passed, 12 subtests passed. `git diff --check` passed. No full suite or production database/MCP/hosted validation was run.
+- Limitations: The optional provenance value changes the storage-neutral record contract only. Shared-memory adapters/migrations must agree on a round-trip representation, candidate-ID idempotency, and lookup of conflict links. Checker/reviewer labels remain caller-supplied metadata, not authenticated identity.
+
+## 2026-10-15T08:50:27+05:30 — Enforce evidence project scope on read
+
+- Changed: Capability 1 now rejects evidence rows from storage when their project differs from the authorized read scope. Capability 2 omits out-of-project evidence from supplied knowledge bundles, leaves the claim unknown if no in-scope evidence remains, and reports the omission. Added regression tests and clarified both contracts.
+- Why: A faulty storage adapter or read-only knowledge source could return evidence belonging to another project alongside an in-scope record; before this change, the foreign source identifier could be returned to the caller.
+- Validation: Baseline focused provenance suite — 121 passed, 12 subtests passed. Focused changed-service tests — 44 passed. Post-change capture/evidence/project-state/integration/auth/storage suite — 123 passed, 12 subtests passed. `git diff --check` passed. Full suite and live persistence/hosted authorization were not run.
+- Limitations: This blocks foreign evidence leakage at these read boundaries; it does not authenticate the caller or prove that evidence supports a claim. Cross-capability storage fields for capture certainty, review metadata, conflict links, and source-occurrence timestamps remain unagreed.
+
+## 2026-10-15T02:00:40+05:30 — Require project match for capture evidence conversion
+
+- Changed: `evidence_sources_for` now requires an explicit target project and rejects mismatched candidate scope before mapping provenance. Updated Capability 3 contract documentation, unit tests, and the Capability 1↔3 test bridge to exercise the domain guard.
+- Why: The prior conversion accepted any approved candidate without knowing which project would receive the resulting evidence, leaving cross-project association prevention only in an ad hoc test bridge.
+- Validation: Baseline affected suite — 115 passed, 12 subtests passed. Post-change focused capture and integration tests — 26 passed. Post-change affected capability, integration, and authorization suite — 116 passed, 12 subtests passed. No full suite or production persistence/authorization integration was run.
+- Limitations: The project match is not authentication. Callers still must obtain trusted project scope from the authorization boundary; persistence integration remains unimplemented.
+
+## 2026-10-15T01:43:35+05:30 — Add cross-capability integration test harness
+
+- Changed: Added test-only `tests/integration/test_capability_flow.py` composing Capabilities 1–4 through local bridges and fake storage/read adapters; updated `AI_USAGE.md`. No production interface, persistence, authorization, retrieval, System 1, PostgreSQL, or MCP implementation changed.
+- Why: Validate reviewed capture → evidence-linked knowledge → reconstructed state and event delivery, while making missing shared adapters and metadata loss visible without claiming production integration.
+- Validation: `PYTHONPATH=src .venv/bin/python -m pytest -o addopts='' --import-mode=importlib -q tests/integration/test_capability_flow.py tests/capture/test_pipeline.py tests/evidence/test_service.py tests/project_state/test_reconstructor.py tests/sync/test_service.py tests/test_mcp_authorization.py tests/test_hosted_scope.py tests/database/test_decisions.py tests/database/test_messages.py tests/storage/test_postgres_memory_store.py` — 143 passed, 12 subtests passed. `tests/retrieval/test_strategies.py` produced 5 setup errors from the existing `NameError: DecisionRepository` at line 36. The isolated PageIndex-enabled stdio test exceeded a 30-second timeout (exit 124). No full suite or live database/hosted test was run. `git diff --check` and whitespace checks passed.
+- Limitations: Test adapters are not production adapters. Typed capture uncertainty and conflict links do not cross all current interfaces; source occurrence timestamps are dropped by the Cap3→Cap1 evidence conversion. Same-batch `CaptureResult` can contain a stale conflict-link object even though the review queue has the final links.
 
 ## 2026-10-15T01:14:22+05:30 — Add bidirectional synchronization contract prototype
 

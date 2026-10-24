@@ -54,9 +54,25 @@ still avoid sending secrets.
 
 Candidate IDs are deterministic for the project, category, normalized claim,
 and optional conflict key. Whitespace/case-normalized repeats merge source and
-evidence references. Replaying the same input is idempotent within the in-memory
-repository; a new source with the same claim adds provenance to the same
-candidate. Distinct claims remain separate, including conflicting claims.
+evidence references while a candidate is pending or needs evidence. Replaying
+the same input is idempotent within the in-memory repository. Once approved or
+rejected, a candidate is immutable: an exact retry returns the existing record,
+while changed claim text under the same normalized identity, certainty, source
+references, or evidence is reported in `CaptureResult.suppressed` with reason
+`terminal_candidate_immutable`. The terminal record and its review history are
+left unchanged. A materially different claim or conflict key has a different
+candidate ID and starts pending review; approval or rejection is never
+inherited.
+
+Distinct claims remain separate, including conflicting claims. Conflict links
+are symmetric while both candidates remain reviewable. If a new claim conflicts
+with an already approved or rejected candidate, the new candidate links to the
+terminal candidate, but the terminal candidate's prior conflict relationships
+are not backfilled or changed after review.
+For structured input that updates a candidate more than once or links later
+conflicts in the same batch, `CaptureResult` returns the final saved version
+for each returned candidate ID, so its source and conflict references agree
+with the review queue at the end of that call.
 
 New candidates start `pending_review` and `unverified`. Uncertainty words mark
 the candidate `uncertain`, but do not change the claim to a fact. `unqualified`
@@ -64,8 +80,10 @@ only means the source text contained no recognized uncertainty phrase; it is
 not a confidence or verification result. Reviewers can edit pending candidates,
 request evidence, approve, or reject them. Candidate edits retain the original
 claim and source links. Rejected and approved entries are terminal in this
-prototype. Reviewer IDs and timestamps are supplied metadata, not authenticated
-identities.
+prototype, including their source/evidence associations and conflict links.
+New information for a terminal candidate is explicitly suppressed rather than
+silently attached. Reviewer IDs and timestamps are supplied metadata, not
+authenticated identities.
 
 Approval changes only review status and metadata. It does not verify the claim,
 write shared memory, or make the candidate available to project reconstruction.
@@ -75,33 +93,34 @@ the process exits. It is a testable prototype repository, not durable storage.
 ## Capability 1 and 2 integration seam
 
 Capture reuses Capability 1's `EvidenceSource`, `EvidenceType`, and
-`VerificationStatus`. `evidence_sources_for(candidate)` maps the capture source
-reference to a Capability 1 `EvidenceType.OTHER` reference and retains any
-additional evidence links. It accepts only candidates whose review status is
-`approved`. This mapping is a conversion helper only; it does not create or
-persist a `KnowledgeBundle` or change the candidate's unverified status.
+`VerificationStatus`. `evidence_sources_for(candidate, target_project=...)`
+maps the capture source reference to a Capability 1 `EvidenceType.OTHER`
+reference and retains any additional evidence links. It requires the candidate
+project to match the explicit target project and accepts only candidates whose
+review status is `approved`. The project match is a domain association guard,
+not authentication; callers still need trusted authorization scope before
+writing. `capture_provenance_for(candidate, target_project=...)` creates the
+storage-neutral provenance envelope carried by `KnowledgeRecord`. It accepts
+only approved candidates whose source verification status is unverified;
+approval does not set knowledge verification.
 
-The mapping keeps the capture source type in the locator, but Capability 1 has
-no dedicated evidence type for a supplied summary/report. Its `EvidenceSource`
-also has no source-occurrence timestamp; `EvidenceRecord.captured_at` is the
-time Celestin captured the reference and must not be overloaded with the source
-timestamp. A shared contract should decide whether to extend those fields or
-retain typed source metadata alongside the evidence reference.
+The original capture source type, ID, locator, revision, and occurrence time
+remain in capture provenance. Mapped `EvidenceType.OTHER` records remain the
+authoritative resolution references; `EvidenceRecord.captured_at` is persistence
+time and is distinct from source occurrence time. Candidate identity, category,
+certainty, review metadata, original edited claim, and conflict candidate IDs
+also remain in the provenance envelope. Reviewer labels are not authenticated
+identities.
 
-An eventual authorized adapter should expose only approved candidates to
-Capability 1, create a `KnowledgeRecord` with `verification_status=unverified`,
-and preserve every source/evidence reference. Capability 1 currently has no
-knowledge types specifically for incomplete work or blockers; the shared-memory
-owner must decide whether to extend `KnowledgeType` or how to map those
-categories without losing meaning. Candidate approval must remain distinct from
-verification. Rejected and pending candidates must not be included as accepted
-records. Capability 2 currently reads only supplied `KnowledgeBundle` values;
-it has no review-queue reader and should receive only approved, explicitly
-mapped records through a future authorized read interface.
+The existing `KnowledgeRecord` gets an optional `capture_provenance` field and
+Capability 2 returns it with the knowledge and evidence record IDs. Current
+category mappings are explicit; incomplete work and blockers are rejected until
+the shared-memory owner agrees on dedicated types or an equivalent mapping.
+Rejected and pending candidates are not accepted records. Capability 2 still
+reads only supplied `KnowledgeBundle` values and has no review-queue reader.
 
-Before persistent integration, owners must agree on a project-authorized
-candidate list/read contract, atomic idempotent upsert semantics, category
-mapping, a way to retain conflict-group links (Capability 1 currently has no
-explicit conflict relation), preservation of edits and review state, and which
-actor identity is trusted for review metadata. This prototype intentionally
-does not define a database schema, hosted authorization path, API, or MCP tool.
+Before persistent integration, owners must agree on how adapters serialize and
+round-trip `capture_provenance`, enforce unique `(project, candidate_id)`
+idempotency, query conflicts, and expose approved records under trusted project
+scope. This prototype intentionally does not define a database schema, hosted
+authorization path, API, or MCP tool.

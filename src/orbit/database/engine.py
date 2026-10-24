@@ -5,10 +5,10 @@ decisions. This module owns all DDL so the schema is defined in exactly one
 place.
 
 Migration strategy: ``PRAGMA user_version`` tracks the applied schema
-version. Migrations are ordered scripts in ``SCHEMA_MIGRATIONS``; on
-connect, every migration numbered higher than the current ``user_version``
-is applied, each inside its own transaction. A clean checkout therefore
-initializes itself on first connect with no manual steps.
+version. ``SCHEMA_MIGRATIONS`` contains ordered sequences of complete SQL
+statements; on connect, each pending migration is applied in its own
+transaction. A clean checkout therefore initializes itself on first connect
+with no manual steps.
 
 Environment:
     ``CELESTIN_DB_PATH`` overrides the database location. The legacy
@@ -30,10 +30,12 @@ DB_PATH = Path(
     or str(DEFAULT_DB_PATH)
 )
 
-# Every key in this dict is a schema version. Applying a migration bumps
-# user_version to that key.
-SCHEMA_MIGRATIONS: dict[int, str] = {
-    1: """
+# Every key in this dict is a schema version. Each value contains complete SQL
+# statements; trigger bodies intentionally remain a single statement despite
+# their internal semicolons. Applying a migration bumps user_version to its key.
+SCHEMA_MIGRATIONS: dict[int, tuple[str, ...]] = {
+    1: (
+        """
     CREATE TABLE IF NOT EXISTS chat_messages (
         id              INTEGER PRIMARY KEY,
         project         TEXT NOT NULL,
@@ -41,11 +43,15 @@ SCHEMA_MIGRATIONS: dict[int, str] = {
         role            TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
         content         TEXT NOT NULL,
         created_at      TEXT NOT NULL
-    );
+    )
+    """,
 
+        """
     CREATE INDEX IF NOT EXISTS idx_chat_messages_project_conversation
-        ON chat_messages (project, conversation_id, id);
+        ON chat_messages (project, conversation_id, id)
+    """,
 
+        """
     CREATE TABLE IF NOT EXISTS project_memory (
         id                INTEGER PRIMARY KEY,
         project           TEXT NOT NULL,
@@ -57,12 +63,16 @@ SCHEMA_MIGRATIONS: dict[int, str] = {
         updated_at        TEXT NOT NULL,
 
         UNIQUE (project, key)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_project_memory_project
-        ON project_memory (project);
+    )
     """,
-    2: """
+
+        """
+    CREATE INDEX IF NOT EXISTS idx_project_memory_project
+        ON project_memory (project)
+    """,
+    ),
+    2: (
+        """
     -- FTS5 indexes are maintained alongside the authoritative rows. Metadata
     -- columns stay UNINDEXED but are returned by the retrieval adapter.
     CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(
@@ -71,8 +81,10 @@ SCHEMA_MIGRATIONS: dict[int, str] = {
         source_id UNINDEXED,
         created_at UNINDEXED,
         content
-    );
+    )
+    """,
 
+        """
     CREATE TRIGGER IF NOT EXISTS chat_messages_fts_insert
     AFTER INSERT ON chat_messages BEGIN
         INSERT INTO chat_messages_fts
@@ -80,13 +92,17 @@ SCHEMA_MIGRATIONS: dict[int, str] = {
         VALUES
             (new.id, CAST(new.id AS TEXT), new.project, new.conversation_id,
              new.created_at, new.content);
-    END;
+    END
+    """,
 
+        """
     CREATE TRIGGER IF NOT EXISTS chat_messages_fts_delete
     AFTER DELETE ON chat_messages BEGIN
         DELETE FROM chat_messages_fts WHERE rowid = old.id;
-    END;
+    END
+    """,
 
+        """
     CREATE TRIGGER IF NOT EXISTS chat_messages_fts_update
     AFTER UPDATE ON chat_messages BEGIN
         DELETE FROM chat_messages_fts WHERE rowid = old.id;
@@ -95,8 +111,10 @@ SCHEMA_MIGRATIONS: dict[int, str] = {
         VALUES
             (new.id, CAST(new.id AS TEXT), new.project, new.conversation_id,
              new.created_at, new.content);
-    END;
+    END
+    """,
 
+        """
     CREATE VIRTUAL TABLE IF NOT EXISTS project_memory_fts USING fts5(
         decision_id UNINDEXED,
         project_id UNINDEXED,
@@ -104,8 +122,10 @@ SCHEMA_MIGRATIONS: dict[int, str] = {
         updated_at UNINDEXED,
         status UNINDEXED,
         value
-    );
+    )
+    """,
 
+        """
     CREATE TRIGGER IF NOT EXISTS project_memory_fts_insert
     AFTER INSERT ON project_memory BEGIN
         INSERT INTO project_memory_fts
@@ -114,13 +134,17 @@ SCHEMA_MIGRATIONS: dict[int, str] = {
             (new.id, CAST(new.id AS TEXT), new.project,
              COALESCE(CAST(new.source_message_id AS TEXT), 'decision:' || CAST(new.id AS TEXT)),
              new.updated_at, new.status, new.value);
-    END;
+    END
+    """,
 
+        """
     CREATE TRIGGER IF NOT EXISTS project_memory_fts_delete
     AFTER DELETE ON project_memory BEGIN
         DELETE FROM project_memory_fts WHERE rowid = old.id;
-    END;
+    END
+    """,
 
+        """
     CREATE TRIGGER IF NOT EXISTS project_memory_fts_update
     AFTER UPDATE ON project_memory BEGIN
         DELETE FROM project_memory_fts WHERE rowid = old.id;
@@ -130,21 +154,25 @@ SCHEMA_MIGRATIONS: dict[int, str] = {
             (new.id, CAST(new.id AS TEXT), new.project,
              COALESCE(CAST(new.source_message_id AS TEXT), 'decision:' || CAST(new.id AS TEXT)),
              new.updated_at, new.status, new.value);
-    END;
+    END
+    """,
 
-    -- Backfill rows that predate this migration.
+        """
     INSERT INTO chat_messages_fts
         (rowid, message_id, project_id, source_id, created_at, content)
     SELECT id, CAST(id AS TEXT), project, conversation_id, created_at, content
-    FROM chat_messages;
+    FROM chat_messages
+    """,
 
+        """
     INSERT INTO project_memory_fts
         (rowid, decision_id, project_id, source_id, updated_at, status, value)
     SELECT id, CAST(id AS TEXT), project,
            COALESCE(CAST(source_message_id AS TEXT), 'decision:' || CAST(id AS TEXT)),
            updated_at, status, value
-    FROM project_memory;
+    FROM project_memory
     """,
+    ),
 }
 
 _ROLE_VALUES = ("user", "assistant", "system")
@@ -180,16 +208,35 @@ def _migration_applied(conn: sqlite3.Connection, version: int) -> bool:
     return int(row[0]) >= version
 
 
-def _apply_migration(conn: sqlite3.Connection, version: int, script: str) -> None:
+def _apply_migration(
+    conn: sqlite3.Connection,
+    version: int,
+    statements: tuple[str, ...],
+) -> None:
+    """Apply one migration atomically, rechecking its version under the write lock."""
     try:
         conn.execute("BEGIN IMMEDIATE")
-        conn.executescript(script)
-        # NOTE: sqlite3 executescript() implicitly commits any open
-        # transaction, so user_version is raised only after the DDL above
-        # has been committed.
+        if _migration_applied(conn, version):
+            conn.execute("COMMIT")
+            return
+
+        for statement in statements:
+            conn.execute(statement)
+
         conn.execute(f"PRAGMA user_version = {int(version)}")
-    except sqlite3.Error as exc:
-        raise DatabaseError(f"schema migration {version} failed: {exc}") from exc
+        conn.execute("COMMIT")
+    except BaseException as exc:
+        if conn.in_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error as rollback_error:
+                raise DatabaseError(
+                    f"schema migration {version} failed and rollback failed: "
+                    f"{rollback_error}"
+                ) from exc
+        if isinstance(exc, sqlite3.Error):
+            raise DatabaseError(f"schema migration {version} failed: {exc}") from exc
+        raise
 
 
 def connect(path: str | Path | None = None) -> sqlite3.Connection:
@@ -201,7 +248,11 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     """
     file_path = _resolve_path(path)
     conn = _create_connection(file_path)
-    _migrate(conn)
+    try:
+        _migrate(conn)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 

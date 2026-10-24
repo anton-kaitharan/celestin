@@ -73,6 +73,41 @@ class EvidenceRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class CaptureSourceProvenance:
+    """Original capture-source locator and occurrence time, before evidence mapping."""
+
+    source_type: str
+    source_id: str
+    occurred_at: str | None = None
+    revision: str | None = None
+    locator: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureKnowledgeProvenance:
+    """Review and capture metadata carried with a converted knowledge claim.
+
+    Reviewer labels are provenance supplied by the capture domain. They are not
+    authenticated identities and do not establish verification.
+    """
+
+    candidate_id: str
+    project_id: str
+    category: str
+    certainty: str
+    review_status: str
+    candidate_verification_status: str
+    source_references: tuple[CaptureSourceProvenance, ...]
+    candidate_created_at: str
+    candidate_updated_at: str
+    original_claim: str | None = None
+    reviewed_by: str | None = None
+    reviewed_at: str | None = None
+    review_note: str | None = None
+    conflicts_with: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class KnowledgeRecord:
     knowledge_id: str
     project: str
@@ -87,6 +122,7 @@ class KnowledgeRecord:
     checked_at: str | None = None
     checked_by: str | None = None
     check_note: str | None = None
+    capture_provenance: CaptureKnowledgeProvenance | None = None
 
 
 @dataclass(frozen=True, slots=True)

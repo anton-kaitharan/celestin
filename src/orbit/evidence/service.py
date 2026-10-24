@@ -1,7 +1,9 @@
 """Authorized domain service for evidence-linked knowledge.
 
-Persistence is supplied through a storage-neutral port. SQLite and PostgreSQL
-adapters do not implement this port yet; see docs/evidence-linked-memory-contract.md.
+Persistence is supplied through a storage-neutral port. The request-bound
+PostgreSQL adapter implements that port through the hosted request unit of work;
+there is no SQLite Evidence adapter or MCP runtime wiring. See
+docs/evidence-linked-memory-contract.md for the domain prototype and limitations.
 """
 
 from __future__ import annotations
@@ -11,9 +13,18 @@ from datetime import datetime, timezone
 from typing import Callable, Protocol, Sequence
 from uuid import uuid4
 
-from orbit.mcp_server.authorization import AuthorizedProject, READ, WRITE
+from orbit.mcp_server.authorization import (
+    AuthenticatedPrincipal,
+    AuthorizedProject,
+    ProjectAccessDenied,
+    ProjectAuthorizer,
+    READ,
+    WRITE,
+)
 
 from .model import (
+    CaptureKnowledgeProvenance,
+    CaptureSourceProvenance,
     EvidenceRecord,
     EvidenceSource,
     EvidenceType,
@@ -56,6 +67,10 @@ class InvalidKnowledgeTransition(EvidenceMemoryError):
 
 class EvidenceLinkedMemoryStore(Protocol):
     """Minimal persistence contract; adapters must enforce project-scoped IDs.
+
+    Adapters must round-trip optional ``KnowledgeRecord.capture_provenance``
+    without dropping or rewriting it. An adapter that cannot preserve it must
+    explicitly reject writes that contain capture provenance.
 
     ``create_knowledge`` and ``supersede_knowledge`` are atomic operations.
     ``attach_evidence`` is idempotent for the same project, knowledge record,
@@ -103,9 +118,11 @@ class EvidenceReferenceResolver(Protocol):
 class EvidenceLinkedMemoryService:
     """Create, associate, inspect, verify, and supersede project knowledge.
 
-    Every operation requires an ``AuthorizedProject`` produced by Celestin's
-    existing authorization boundary. Verification status changes are explicit
-    caller assertions; this service never checks source truth on its own.
+    A supplied ``AuthorizedProject`` is a project/action selector, not proof of
+    authorization. Each operation is checked by the configured authorizer
+    using the principal fixed when the trusted caller builds this service.
+    Verification status changes are explicit caller assertions; this service
+    never checks source truth on its own.
     """
 
     def __init__(
@@ -113,11 +130,15 @@ class EvidenceLinkedMemoryService:
         store: EvidenceLinkedMemoryStore,
         resolver: EvidenceReferenceResolver,
         *,
+        authorizer: ProjectAuthorizer,
+        principal: AuthenticatedPrincipal | None = None,
         id_factory: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._store = store
         self._resolver = resolver
+        self._authorizer = authorizer
+        self._principal = principal
         self._id_factory = id_factory or (lambda: str(uuid4()))
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
@@ -127,13 +148,16 @@ class EvidenceLinkedMemoryService:
         knowledge_type: KnowledgeType,
         claim: str,
         evidence_sources: Sequence[EvidenceSource],
+        *,
+        capture_provenance: CaptureKnowledgeProvenance | None = None,
     ) -> KnowledgeBundle:
-        project = _require_scope(scope, WRITE)
+        project = self._require_scope(scope, WRITE)
         claim = _required_text(claim, "claim")
         if not isinstance(knowledge_type, KnowledgeType):
             raise EvidenceValidationError("knowledge_type must be a KnowledgeType")
         if not evidence_sources:
             raise EvidenceValidationError("at least one evidence source is required")
+        _validate_capture_provenance(capture_provenance, project, evidence_sources)
 
         now = self._now()
         evidence = self._new_evidence(project, evidence_sources, now)
@@ -144,6 +168,7 @@ class EvidenceLinkedMemoryService:
             claim=claim,
             created_at=now,
             updated_at=now,
+            capture_provenance=capture_provenance,
         )
         self._store.create_knowledge(record, evidence)
         return KnowledgeBundle(record=record, evidence=evidence)
@@ -154,7 +179,7 @@ class EvidenceLinkedMemoryService:
         knowledge_id: str,
         source: EvidenceSource,
     ) -> EvidenceRecord:
-        project = _require_scope(scope, WRITE)
+        project = self._require_scope(scope, WRITE)
         knowledge_id = _required_text(knowledge_id, "knowledge_id")
         self._require_record(project, knowledge_id)
         evidence = self._new_evidence(project, (source,), self._now())[0]
@@ -163,10 +188,17 @@ class EvidenceLinkedMemoryService:
     def get_knowledge(
         self, scope: AuthorizedProject, knowledge_id: str
     ) -> KnowledgeBundle:
-        project = _require_scope(scope, READ)
+        project = self._require_scope(scope, READ)
         knowledge_id = _required_text(knowledge_id, "knowledge_id")
         record = self._require_record(project, knowledge_id)
         evidence = tuple(self._store.list_evidence(project, knowledge_id))
+        if any(
+            not isinstance(item, EvidenceRecord) or item.project != project
+            for item in evidence
+        ):
+            raise EvidenceMemoryError(
+                "storage returned evidence outside the requested project"
+            )
         # Re-resolve references at read time. Availability is not proof that
         # evidence is current or that it supports the claim.
         refreshed = tuple(
@@ -196,7 +228,7 @@ class EvidenceLinkedMemoryService:
         checked_by: str | None = None,
         note: str | None = None,
     ) -> KnowledgeRecord:
-        project = _require_scope(scope, WRITE)
+        project = self._require_scope(scope, WRITE)
         record = self._require_record(project, _required_text(knowledge_id, "knowledge_id"))
         checked_by, note = _verification_metadata(status, checked_by, note)
         now = self._now()
@@ -228,7 +260,7 @@ class EvidenceLinkedMemoryService:
         checked_by: str | None = None,
         note: str | None = None,
     ) -> EvidenceRecord:
-        project = _require_scope(scope, WRITE)
+        project = self._require_scope(scope, WRITE)
         knowledge_id = _required_text(knowledge_id, "knowledge_id")
         evidence_id = _required_text(evidence_id, "evidence_id")
         self._require_record(project, knowledge_id)
@@ -263,8 +295,10 @@ class EvidenceLinkedMemoryService:
         knowledge_type: KnowledgeType,
         claim: str,
         evidence_sources: Sequence[EvidenceSource],
+        *,
+        capture_provenance: CaptureKnowledgeProvenance | None = None,
     ) -> KnowledgeBundle:
-        project = _require_scope(scope, WRITE)
+        project = self._require_scope(scope, WRITE)
         previous_id = _required_text(previous_id, "previous_id")
         previous = self._require_record(project, previous_id)
         if previous.lifecycle_status is not LifecycleStatus.CURRENT:
@@ -274,6 +308,7 @@ class EvidenceLinkedMemoryService:
             raise EvidenceValidationError("knowledge_type must be a KnowledgeType")
         if not evidence_sources:
             raise EvidenceValidationError("at least one evidence source is required")
+        _validate_capture_provenance(capture_provenance, project, evidence_sources)
 
         now = self._now()
         evidence = self._new_evidence(project, evidence_sources, now)
@@ -285,6 +320,7 @@ class EvidenceLinkedMemoryService:
             created_at=now,
             updated_at=now,
             supersedes_id=previous_id,
+            capture_provenance=capture_provenance,
         )
         self._store.supersede_knowledge(project, previous_id, successor, evidence)
         return KnowledgeBundle(record=successor, evidence=evidence)
@@ -375,6 +411,22 @@ class EvidenceLinkedMemoryService:
         value = self._id_factory()
         return _required_text(value, "generated identifier")
 
+    def _require_scope(self, scope: AuthorizedProject, action: str) -> str:
+        if not isinstance(scope, AuthorizedProject) or scope.action != action:
+            raise PermissionError(f"a project {action} selector is required")
+        project = _required_text(scope.project, "project")
+        try:
+            checked = self._authorizer.authorize(self._principal, project, action)
+        except ProjectAccessDenied:
+            raise PermissionError("project access denied") from None
+        if (
+            not isinstance(checked, AuthorizedProject)
+            or checked.project != project
+            or checked.action != action
+        ):
+            raise PermissionError("project access denied")
+        return project
+
     def _now(self) -> str:
         value = self._clock()
         if not isinstance(value, datetime) or value.tzinfo is None:
@@ -382,12 +434,6 @@ class EvidenceLinkedMemoryService:
         return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
             "+00:00", "Z"
         )
-
-
-def _require_scope(scope: AuthorizedProject, action: str) -> str:
-    if not isinstance(scope, AuthorizedProject) or scope.action != action:
-        raise PermissionError(f"an authorized project {action} scope is required")
-    return _required_text(scope.project, "authorized project")
 
 
 def _required_text(value: str, field: str) -> str:
@@ -419,3 +465,89 @@ def _verification_metadata(
     if note is not None and not isinstance(note, str):
         raise EvidenceValidationError("note must be a string or None")
     return checked_by, note.strip() if note else None
+
+
+def _validate_capture_provenance(
+    provenance: CaptureKnowledgeProvenance | None,
+    project: str,
+    evidence_sources: Sequence[EvidenceSource],
+) -> None:
+    if provenance is None:
+        return
+    if not isinstance(provenance, CaptureKnowledgeProvenance):
+        raise EvidenceValidationError(
+            "capture_provenance must be a CaptureKnowledgeProvenance or None"
+        )
+    if _required_text(provenance.project_id, "capture provenance project") != project:
+        raise EvidenceValidationError(
+            "capture provenance project does not match authorized project"
+        )
+    for field, value in (
+        ("candidate_id", provenance.candidate_id),
+        ("category", provenance.category),
+        ("certainty", provenance.certainty),
+        ("review_status", provenance.review_status),
+        ("candidate_verification_status", provenance.candidate_verification_status),
+        ("candidate_created_at", provenance.candidate_created_at),
+        ("candidate_updated_at", provenance.candidate_updated_at),
+    ):
+        _required_text(value, f"capture provenance {field}")
+    if provenance.review_status != "approved":
+        raise EvidenceValidationError(
+            "only approved capture provenance can be attached to knowledge"
+        )
+    _required_text(provenance.reviewed_by, "capture provenance reviewed_by")
+    _required_text(provenance.reviewed_at, "capture provenance reviewed_at")
+    if provenance.candidate_verification_status != VerificationStatus.UNVERIFIED.value:
+        raise EvidenceValidationError(
+            "capture candidate verification must remain unverified during conversion"
+        )
+    if not isinstance(provenance.source_references, tuple):
+        raise EvidenceValidationError("capture source references must be a tuple")
+    for reference in provenance.source_references:
+        if not isinstance(reference, CaptureSourceProvenance):
+            raise EvidenceValidationError(
+                "capture source references must be CaptureSourceProvenance values"
+            )
+        _required_text(reference.source_type, "capture source type")
+        _required_text(reference.source_id, "capture source ID")
+        for name in ("occurred_at", "revision", "locator"):
+            value = getattr(reference, name)
+            if value is not None:
+                _required_text(value, f"capture source {name}")
+    mapped_sources: set[tuple[str, str, str | None, str | None]] = set()
+    for source in evidence_sources:
+        if not isinstance(source, EvidenceSource) or not isinstance(
+            source.evidence_type, EvidenceType
+        ):
+            raise EvidenceValidationError("each evidence source must be an EvidenceSource")
+        mapped_sources.add(
+            (
+                source.evidence_type.value,
+                _required_text(source.source_id, "source_id"),
+                _optional_text(source.locator, "locator"),
+                _optional_text(source.revision, "revision"),
+            )
+        )
+    for reference in provenance.source_references:
+        mapped_locator = ": ".join(
+            part for part in (reference.source_type, reference.locator) if part
+        )
+        expected = (
+            EvidenceType.OTHER.value,
+            reference.source_id,
+            mapped_locator,
+            reference.revision,
+        )
+        if expected not in mapped_sources:
+            raise EvidenceValidationError(
+                "capture source provenance has no matching evidence source"
+            )
+    if not isinstance(provenance.conflicts_with, tuple):
+        raise EvidenceValidationError("capture conflict references must be a tuple")
+    for candidate_id in provenance.conflicts_with:
+        _required_text(candidate_id, "conflicting candidate ID")
+    for field in ("reviewed_by", "reviewed_at", "review_note", "original_claim"):
+        value = getattr(provenance, field)
+        if value is not None and not isinstance(value, str):
+            raise EvidenceValidationError(f"capture provenance {field} must be text or None")

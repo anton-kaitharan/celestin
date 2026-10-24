@@ -81,6 +81,16 @@ rendered as one compact JSON object per line. Each line preserves record ID,
 project ID, source ID, timestamp, record kind, status, relevance score, and full
 content. The budget applies to the complete rendered text, including metadata.
 
+Every retrieved `content` value is untrusted project data, including content
+from an approved canonical decision. JSON encoding preserves field boundaries
+and escapes control characters; it does not prevent a language model from
+following instructions contained in the text. The `status` field for a
+canonical decision means its decision lifecycle (`draft`, `approved`, or
+`deprecated`), not evidence verification. This retrieval contract carries no
+Capability 1 verification, conflict, or stale status. Consumers must treat
+tool results as evidence to inspect, never as privileged instructions or proof
+that a claim is correct.
+
 No compatible tokenizer dependency is installed in this workspace. The default
 `Utf8ByteTokenEstimator` counts UTF-8 bytes and reports `token_count_is_estimate`
 as true; it does not claim an exact model-token count. Byte count is a

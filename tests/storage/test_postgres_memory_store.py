@@ -27,6 +27,9 @@ class Result:
     def fetchone(self):
         return self._row
 
+    def close(self):
+        pass
+
 
 class ScriptedConnection(AbstractContextManager):
     def __init__(self, responses):
@@ -43,6 +46,8 @@ class ScriptedConnection(AbstractContextManager):
 
     def execute(self, query, params=()):
         self.calls.append((query, params))
+        if "set_config('celestin.workspace_id'" in query:
+            return Result((params[0], params[1]))
         return Result(next(self.responses))
 
 
@@ -62,10 +67,12 @@ def test_insert_message_resolves_project_inside_workspace_and_returns_utc_id():
     assert message.message_id == "73"
     assert message.project == "legacy-project"
     assert message.created_at == "2026-10-14T12:30:00.000000Z"
-    lookup, insert = connection.calls
+    lookup, scope, insert = connection.calls
     assert "workspace_id = %s::uuid" in lookup[0]
     assert "legacy_project_key = %s" in lookup[0]
     assert lookup[1] == (WORKSPACE_ID, "legacy-project")
+    assert "set_config('celestin.workspace_id'" in scope[0]
+    assert scope[1] == (WORKSPACE_ID, PROJECT_ID)
     assert "INSERT INTO chat_messages" in insert[0]
     assert "workspace_id" in insert[0] and "project_id" in insert[0]
     assert insert[1][:5] == (WORKSPACE_ID, PROJECT_ID, "conversation-a", "user", "synthetic content")
@@ -89,7 +96,9 @@ def test_save_decision_upserts_with_same_project_source_and_preserves_created_ti
     assert decision.status == "draft"
     assert decision.source_message_id == "73"
     assert decision.created_at == decision.updated_at == "2026-10-14T12:30:00.000000Z"
-    source_lookup, upsert = connection.calls[1:]
+    scope, source_lookup, upsert = connection.calls[1:]
+    assert "set_config('celestin.workspace_id'" in scope[0]
+    assert scope[1] == (WORKSPACE_ID, PROJECT_ID)
     assert "workspace_id = %s::uuid AND project_id = %s::uuid AND id = %s" in source_lookup[0]
     assert source_lookup[1] == (WORKSPACE_ID, PROJECT_ID, 73)
     assert "ON CONFLICT (project_id, key) DO UPDATE" in upsert[0]
@@ -118,7 +127,7 @@ def test_missing_project_and_source_fail_before_write():
         make_store(missing_source).save_decision(
             "legacy-project", "key", "value", "99"
         )
-    assert len(missing_source.calls) == 2
+    assert len(missing_source.calls) == 3
     assert "INSERT INTO project_memory" not in missing_source.calls[-1][0]
     assert missing_source.exit_error is SourceMessageNotFoundError
 
@@ -141,7 +150,8 @@ def test_update_status_is_project_scoped_and_reports_missing_decision():
             "legacy-project", "unknown-key", "approved"
         )
 
-    update = connection.calls[1]
+    scope, update = connection.calls[1:]
+    assert "set_config('celestin.workspace_id'" in scope[0]
     assert "WHERE workspace_id = %s::uuid AND project_id = %s::uuid AND key = %s" in update[0]
     assert update[1][2:] == (WORKSPACE_ID, PROJECT_ID, "unknown-key")
 

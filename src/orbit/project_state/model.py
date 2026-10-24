@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from orbit.evidence.model import CaptureKnowledgeProvenance
+
 
 class FindingKind(str, Enum):
     IMPLEMENTED = "implemented"
@@ -37,6 +39,14 @@ class EvidenceReference:
     line_end: int | None = None
     detail: str | None = None
     classification: EvidenceClass = EvidenceClass.UNKNOWN
+    evidence_record_id: str | None = None
+    locator: str | None = None
+    content_hash: str | None = None
+    recorded_reference_status: str | None = None
+    recorded_verification_status: str | None = None
+    checked_at: str | None = None
+    checked_by: str | None = None
+    check_note: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +62,14 @@ class StateFinding:
     applicability: EvidenceClass | None = None
     recorded_verification: str | None = None
     knowledge_type: str | None = None
+    knowledge_record_id: str | None = None
+    capture_provenance: CaptureKnowledgeProvenance | None = None
+    verification_checked_at: str | None = None
+    verification_checked_by: str | None = None
+    verification_check_note: str | None = None
+    lifecycle_status: str | None = None
+    supersedes_knowledge_id: str | None = None
+    superseded_by_knowledge_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

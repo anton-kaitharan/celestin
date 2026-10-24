@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -35,8 +36,25 @@ def test_semantic_dependencies_are_optional():
 
 
 def test_server_display_name():
-    from orbit.mcp_server.server import mcp, ping
-    assert mcp.name == "Celestin" and ping() == "Celestin MCP server is running."
+    from orbit.mcp_server.server import MCPToolHandlers, build_runtime, create_mcp_server
+    assert create_mcp_server().name == "Celestin"
+    assert MCPToolHandlers(build_runtime()).ping() == "Celestin MCP server is running."
+
+
+def test_main_runs_composed_server_over_stdio(monkeypatch):
+    from orbit.mcp_server import server
+
+    runtime = object()
+    app = Mock()
+    build = Mock(return_value=runtime)
+    create = Mock(return_value=app)
+    monkeypatch.setattr(server, "build_runtime", build)
+    monkeypatch.setattr(server, "create_mcp_server", create)
+
+    server.main()
+
+    create.assert_called_once_with(runtime)
+    app.run.assert_called_once_with(transport="stdio")
 
 
 @pytest.mark.parametrize(

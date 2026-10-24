@@ -5,6 +5,7 @@ from .model import (
     CandidateCertainty,
     CaptureEvent,
     CaptureInput,
+    CaptureOccurrence,
     CaptureResult,
     CaptureSourceReference,
     CaptureSourceType,
@@ -22,7 +23,9 @@ from .service import (
     InvalidReviewTransition,
     KnowledgeCapturePipeline,
     SensitiveContentRejected,
+    capture_provenance_for,
     evidence_sources_for,
+    knowledge_type_for_candidate,
 )
 
 __all__ = [
@@ -32,6 +35,7 @@ __all__ = [
     "CaptureError",
     "CaptureEvent",
     "CaptureInput",
+    "CaptureOccurrence",
     "CaptureRepositoryError",
     "CaptureResult",
     "CaptureSourceReference",
@@ -45,5 +49,7 @@ __all__ = [
     "ReviewStatus",
     "SensitiveContentRejected",
     "SuppressedCapture",
+    "capture_provenance_for",
     "evidence_sources_for",
+    "knowledge_type_for_candidate",
 ]

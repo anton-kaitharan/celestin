@@ -2,10 +2,13 @@
 -- This script assumes the schema is already installed in public; it never
 -- creates, alters, drops, or truncates persistent schema objects.
 --
--- Run only against the disposable local validation database:
--- psql -X -W -h 127.0.0.1 -p 5432 -U postgres \
---   -d celestin_schema_test_v2 -v ON_ERROR_STOP=1 \
---   -f tests/postgres/validate_hosted_schema.sql
+-- Run only after an owner has approved and provisioned a fresh disposable
+-- database that already contains the reviewed schema. Supply the same exact
+-- name as the connection target and approved_test_database psql variable:
+-- psql -X -W -h 127.0.0.1 -p 5432 -U <test-role> \
+--   -d <approved-disposable-database> \
+--   -v approved_test_database=<same-approved-disposable-database> \
+--   -v ON_ERROR_STOP=1 -f tests/postgres/validate_hosted_schema.sql
 --
 -- All fixtures and temporary helpers are inside one transaction. Expected
 -- failures are caught in PL/pgSQL exception blocks (subtransactions). The
@@ -15,14 +18,38 @@
 \set ON_ERROR_STOP on
 \pset pager off
 
+\if :{?approved_test_database}
+\else
+\echo Refusing validation: pass -v approved_test_database=<approved disposable database>
+\quit 2
+\endif
+
+SELECT current_database() = :'approved_test_database'
+       AND current_database() ~ '^celestin_it_[0-9]{8}_[0-9a-f]{8}$'
+       AND current_database() NOT IN (
+           'celestin_schema_test_v2',
+           'celestin_it_20261014_a7f3c9',
+           'celestin_it_20261015_b364bbae',
+           'celestin_it_20261015_10ac5ae9',
+           'celestin_it_20261015_0b8e767c'
+       )
+       AND inet_server_addr() IS NOT DISTINCT FROM inet '127.0.0.1'
+       AS approved_target \gset
+
+\if :approved_target
+\echo Supplied target name and loopback endpoint match the guard.
+\else
+\echo Refusing validation: target must match the supplied approved name, use the disposable naming convention, and be on 127.0.0.1.
+\quit 2
+\endif
+
 DO $guard$
 DECLARE
     found_tables integer;
     has_expected_index boolean;
 BEGIN
-    IF current_database() <> 'celestin_schema_test_v2'
-       OR inet_server_addr() IS DISTINCT FROM inet '127.0.0.1' THEN
-        RAISE EXCEPTION 'Refusing validation: expected celestin_schema_test_v2 at 127.0.0.1';
+    IF inet_server_addr() IS DISTINCT FROM inet '127.0.0.1' THEN
+        RAISE EXCEPTION 'Refusing validation: expected a loopback PostgreSQL server';
     END IF;
 
     SELECT count(*)
@@ -123,7 +150,7 @@ BEGIN
 END
 $guard$;
 
-\echo Target and required schema verified: celestin_schema_test_v2 at 127.0.0.1
+\echo Approved target and required hosted schema verified.
 BEGIN;
 
 CREATE TEMP TABLE _hosted_schema_validation_results (

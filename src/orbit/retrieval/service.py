@@ -13,7 +13,7 @@ from dataclasses import asdict, replace
 from typing import Any
 
 from orbit.database.engine import connect
-from orbit.retrieval.context_builder import ContextBundle, build_context_bundle
+from orbit.retrieval.context_builder import ContextBundle, ContextItem, build_context_bundle
 from orbit.retrieval.fts import SearchResult
 from orbit.retrieval.hybrid import RRF_K, RetrievalInfo, reciprocal_rank_fusion
 from orbit.retrieval.ranking import RankingPolicy, RetrievalCandidate
@@ -23,6 +23,11 @@ from orbit.pageindex.backend import PageIndexBackend
 from orbit.pageindex.errors import PageIndexUnavailable
 from orbit.retrieval.relevance import top_k_with_exemptions
 from orbit.retrieval.rerank import RerankUnavailable
+from orbit.retrieval.knowledge_state import (
+    KnowledgeStateEnvelope,
+    KnowledgeStateReader,
+    KnowledgeStateScopeError,
+)
 from orbit.retrieval.system1 import MAX_CHOICES as SYSTEM1_MAX_CHOICES
 from orbit.retrieval.selector import SelectorContext, plan_query
 from orbit.retrieval.strategies import (
@@ -171,6 +176,7 @@ class RetrievalService:
         connection=None,
         *,
         retrieval_data: RetrievalData | None = None,
+        knowledge_state_reader: KnowledgeStateReader | None = None,
         candidate_limit: int = 100,
         semantic: SemanticSearch | None = None,
         documents: PageIndexBackend | None = None,
@@ -195,7 +201,12 @@ class RetrievalService:
         if candidate_limit < 1:
             raise ValueError("candidate_limit must be at least 1")
 
+        if knowledge_state_reader is not None and not callable(
+            getattr(knowledge_state_reader, "get_for_candidate", None)
+        ):
+            raise TypeError("knowledge_state_reader must provide get_for_candidate")
         self._data = retrieval_data
+        self._knowledge_state_reader = knowledge_state_reader
         self._candidate_limit = candidate_limit
         self._semantic = semantic
         self._rrf_k = rrf_k
@@ -335,6 +346,22 @@ class RetrievalService:
 
     # ---- strategy-based context retrieval -------------------------------------------------
 
+    def _knowledge_state_for_candidate(
+        self, project: str, record_project: str, record_kind: str, record_id: str
+    ) -> KnowledgeStateEnvelope | None:
+        reader = self._knowledge_state_reader
+        if reader is None or record_project != project:
+            return None
+        bundle = reader.get_for_candidate(project, record_kind, record_id)
+        if bundle is None:
+            return None
+        state = KnowledgeStateEnvelope.from_bundle(bundle)
+        if state.project_id != project:
+            raise KnowledgeStateScopeError(
+                "Capability 1 knowledge project does not match the requested project"
+            )
+        return state
+
     def _available(self) -> frozenset[str]:
         names = {"fts"}
         if self._semantic is not None:
@@ -453,6 +480,9 @@ class RetrievalService:
                 candidates.append(RetrievalCandidate(
                     record_id=c.record_id, project_id=c.project, source_id=c.source_id, content=c.content,
                     timestamp=c.timestamp, relevance_score=scores[rid], record_kind=c.record_type, status=c.status,
+                    knowledge_state=self._knowledge_state_for_candidate(
+                        project, c.project, c.record_type, c.record_id
+                    ),
                 ))
                 if c.source:
                     self.last_sources[c.record_id] = c.source
@@ -708,17 +738,7 @@ def _context_bundle_dict(bundle: ContextBundle, query: str) -> dict[str, Any]:
         "project": bundle.project_id,
         "query": query,
         "items": [
-            {
-                "record_id": item.record_id,
-                "project_id": item.project_id,
-                "source_message_id": item.source_id,
-                "created_at": item.timestamp,
-                "record_kind": item.record_kind,
-                "status": item.status,
-                "content": item.content,
-                "relevance_score": item.relevance_score,
-            }
-            for item in bundle.items
+            _context_item_dict(item) for item in bundle.items
         ],
         "excluded": [
             {
@@ -739,6 +759,22 @@ def _context_bundle_dict(bundle: ContextBundle, query: str) -> dict[str, Any]:
         "token_count_is_estimate": bundle.token_count_is_estimate,
         "token_counter": bundle.token_counter,
     }
+
+
+def _context_item_dict(item: ContextItem) -> dict[str, object]:
+    result: dict[str, object] = {
+        "record_id": item.record_id,
+        "project_id": item.project_id,
+        "source_message_id": item.source_id,
+        "created_at": item.timestamp,
+        "record_kind": item.record_kind,
+        "status": item.status,
+        "content": item.content,
+        "relevance_score": item.relevance_score,
+    }
+    if item.knowledge_state is not None:
+        result["knowledge_state"] = item.knowledge_state.as_dict()
+    return result
 
 
 def search_chat_history(

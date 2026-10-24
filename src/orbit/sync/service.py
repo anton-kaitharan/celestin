@@ -11,7 +11,14 @@ from typing import Callable, Protocol, Sequence
 
 from orbit.capture.model import CandidateCategory, CaptureSourceReference, CaptureSourceType
 from orbit.evidence.model import EvidenceSource, EvidenceType
-from orbit.mcp_server.authorization import AuthorizedProject, READ, WRITE
+from orbit.mcp_server.authorization import (
+    AuthenticatedPrincipal,
+    AuthorizedProject,
+    ProjectAccessDenied,
+    ProjectAuthorizer,
+    READ,
+    WRITE,
+)
 
 from .model import (
     CURRENT_SCHEMA_VERSION,
@@ -149,24 +156,28 @@ class InMemorySyncEventStore:
 
 
 class ProjectSyncService:
-    """Publish and read project events using Celestin's issued project scopes.
+    """Publish and read project events behind a configured project authorizer.
 
-    The service verifies scope type, project, and action. A transport must obtain
-    the scope from the trusted authorization boundary and never construct it
-    from client-supplied project or client labels.
+    A supplied scope is a project/action selector, not proof of authorization.
+    Each operation is reauthorized using the principal fixed by the trusted
+    caller that builds this service.
     """
 
     def __init__(
         self,
         store: SyncEventStore,
         *,
+        authorizer: ProjectAuthorizer,
+        principal: AuthenticatedPrincipal | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._store = store
+        self._authorizer = authorizer
+        self._principal = principal
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def publish(self, scope: AuthorizedProject, submission: SyncEventSubmission) -> SyncReceipt:
-        project = _require_scope(scope, WRITE)
+        project = self._require_scope(scope, WRITE)
         _validate_submission(submission, project)
         received_at = self._now()
         event_id = _event_id(project, submission.source_client_id, submission.idempotency_key)
@@ -202,7 +213,7 @@ class ProjectSyncService:
         cursor: str | None = None,
         page_size: int = DEFAULT_PAGE_SIZE,
     ) -> SyncEventPage:
-        project = _require_scope(scope, READ)
+        project = self._require_scope(scope, READ)
         if (
             not isinstance(page_size, int)
             or isinstance(page_size, bool)
@@ -236,13 +247,23 @@ class ProjectSyncService:
             raise SyncValidationError("clock must return a timezone-aware datetime")
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-
-def _require_scope(scope: AuthorizedProject, action: str) -> str:
-    if not isinstance(scope, AuthorizedProject):
-        raise SyncValidationError("a trusted AuthorizedProject scope is required")
-    if scope.action != action:
-        raise SyncValidationError(f"project scope does not grant {action}")
-    return _required_text(scope.project, "authorized project", MAX_IDENTIFIER_CHARS)
+    def _require_scope(self, scope: AuthorizedProject, action: str) -> str:
+        if not isinstance(scope, AuthorizedProject):
+            raise SyncValidationError("a project selector is required")
+        if scope.action != action:
+            raise SyncValidationError(f"project selector does not request {action}")
+        project = _required_text(scope.project, "project", MAX_IDENTIFIER_CHARS)
+        try:
+            checked = self._authorizer.authorize(self._principal, project, action)
+        except ProjectAccessDenied:
+            raise PermissionError("project access denied") from None
+        if (
+            not isinstance(checked, AuthorizedProject)
+            or checked.project != project
+            or checked.action != action
+        ):
+            raise PermissionError("project access denied")
+        return project
 
 
 def _validate_submission(submission: SyncEventSubmission, authorized_project: str) -> None:

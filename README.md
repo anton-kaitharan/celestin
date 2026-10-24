@@ -7,16 +7,29 @@ Search is SQLite FTS5 keyword search, optionally combined with local semantic
 (embedding) search; see [Semantic search](#semantic-search-optional).
 The server communicates with MCP clients over stdio.
 
+## Product and build context
+
+Celestin's product direction includes automatic knowledge capture, evidence-linked memory, bounded project-state reconstruction, and bidirectional knowledge synchronization. Existing source modules do not by themselves prove the complete flow is wired into persistence and retrieval; verify source and tests before making integration claims.
+
+- [PRD](PRD.md): product scope, capabilities, and decisions.
+- [TRD](TRD.md): technical boundaries, runtime, and security.
+- [Application flow](App_flow.md): intended capability flow and current local MCP workflow.
+- [Design principles](Design.md): provenance, uncertainty, conflicts, and untrusted content.
+- [Database model](database_schema.md): conceptual entities and implementation references.
+- [Build kickoff](BUILD_KICKOFF.md): team handoff prompt; audit notes are historical and need verification.
 ## Requirements
 
 - Python 3.10 or newer
 - SQLite built with FTS5 support (used for full-text search)
 - An MCP-compatible client for the tools; Codex CLI instructions are below
 
-The project uses the [Python MCP SDK](https://github.com/modelcontextprotocol/python-sdk)
-and Python's standard-library SQLite interface. It does not bundle an external
-dataset. Optional semantic embeddings run locally; experimental PageIndex can
-send a query and document outline to the configured model provider when enabled.
+The project uses the [Python MCP SDK](https://github.com/modelcontextprotocol/python-sdk),
+the [RFC 8785 JCS library](https://github.com/trailofbits/rfc8785.py) for the
+isolated Evidence conversion-hashing helper, and Python's standard-library
+SQLite interface. That helper is not yet wired to durable conversion or the MCP
+runtime. The project does not bundle an external dataset. Optional semantic
+embeddings run locally; experimental PageIndex can send a query and document
+outline to the configured model provider when enabled.
 
 ## Install
 
@@ -47,6 +60,13 @@ Set `CELESTIN_DB_PATH` to an absolute writable path to choose another
 location. The older `MEMORY_BRIDGE_DB_PATH` is still honored when
 `CELESTIN_DB_PATH` is unset.
 
+The local `celestin`, `orbit`, and `memory-bridge` commands build a runtime when
+they start and bind their tool handlers to the existing local authorization,
+persistence, and retrieval services. They remain stdio/SQLite commands;
+setting `CELESTIN_POSTGRES_DSN` does not change their transport or backend.
+Runtime construction does not open the SQLite database; connections and schema
+initialization remain lazy until a data operation.
+
 ### PostgreSQL migration foundation (explicit operator command)
 
 Local SQLite remains the default and is not affected by the PostgreSQL tooling.
@@ -56,6 +76,130 @@ For a separately provisioned, empty hosted database, install the optional
 server never runs hosted migrations during startup. See
 [PostgreSQL migrations](docs/postgres-migrations.md) for safety checks and the
 required handling for an existing database without a migration ledger.
+
+### Separate hosted Streamable HTTP runtime
+
+The `celestin-hosted` entry point is a separate, opt-in HTTPS Streamable HTTP
+MCP runtime, with an Auth0 access-token verifier, PostgreSQL authorization, and
+project-scoped PostgreSQL connections. The project-specific login identity is
+bound in PostgreSQL to one workspace/project pair; RLS derives that pair from
+`session_user`, rather than caller-settable scope settings. Hosted code does not
+change the local commands, run migrations, create Auth0 resources, or expose an
+administration endpoint. Its offline tests are available, but this checkout has
+not been validated against PostgreSQL or a non-production Auth0 tenant; do not
+treat it as a verified deployment. Hosted startup remains fail-closed unless
+project-role isolation is explicitly enabled, and that setting is not release
+approval.
+
+Install the optional extra with `python -m pip install -e ".[hosted]"`. Before
+starting the command, obtain and review actual non-production Auth0 and
+PostgreSQL settings. Use the deployment's secret manager for DSNs and keep
+issuer/audience values specific to the approved Auth0 tenant and Celestin API:
+
+- `CELESTIN_POSTGRES_AUTHORIZATION_DSN` — the read-only authorization-reader
+  login. `CELESTIN_POSTGRES_DSN` is for the separate migration command and is
+  not a hosted-runtime fallback.
+- `CELESTIN_HOSTED_PROJECT_DSN_ENV_MAP` — JSON mapping canonical
+  `workspace-uuid/project-uuid` keys to distinct environment-variable names.
+  Each named `CELESTIN_PROJECT_POSTGRES_DSN_*` variable contains that project's
+  database-login DSN. Each login must map to only its configured project in
+  `celestin_private.project_runtime_scopes` and must not have a path to another
+  project's login.
+- `CELESTIN_HOSTED_PROJECT_ROLE_ISOLATION_ENABLED=true` — an explicit gate;
+  the default is disabled. Enabling the setting does not itself approve a
+  deployment.
+- `CELESTIN_AUTH0_ISSUER_URL`, `CELESTIN_AUTH0_AUDIENCE`,
+  `CELESTIN_AUTH0_TOKEN_PROFILE` (`auth0` or `rfc9068`),
+  `CELESTIN_AUTH0_SIGNING_ALGORITHM` (`RS256`), and
+  `CELESTIN_AUTH0_APPROVED_CLIENTS` (JSON object mapping approved client IDs
+  to `human` or `service`)
+- `CELESTIN_HOSTED_PUBLIC_URL`, `CELESTIN_HOSTED_TLS_CERTFILE`, and
+  `CELESTIN_HOSTED_TLS_KEYFILE`
+- Optional limits: `CELESTIN_HOSTED_BIND` (defaults to `127.0.0.1`),
+  `CELESTIN_HOSTED_ALLOW_NON_LOOPBACK` (defaults to `false`),
+  `CELESTIN_HOSTED_PORT` (8765),
+  `CELESTIN_HOSTED_CONTROL_POOL_MIN_SIZE` (1),
+  `CELESTIN_HOSTED_CONTROL_POOL_MAX_SIZE` (4),
+  `CELESTIN_HOSTED_PROJECT_POOL_MAX_SIZE` (2; at most 32 configured project
+  pools),
+  `CELESTIN_HOSTED_DB_POOL_TIMEOUT` (5 seconds),
+  `CELESTIN_HOSTED_DB_CONNECT_TIMEOUT` (5 seconds), and
+  `CELESTIN_HOSTED_DB_STATEMENT_TIMEOUT_MS` (10000)
+
+The HTTP server requires TLS certificate/key files and binds to loopback by
+default. Non-loopback binding requires an explicit setting, but that setting is
+not a substitute for deployment/security review. `/readyz` checks the configured
+authorization-reader and project-login roles, scope mappings, grants, and RLS
+policies. It rejects elevated privileges, unsafe role memberships, protected
+table ownership, or missing isolation prerequisites. Run migrations using a
+separate schema-owner credential; the runtime does not use that credential and
+does not run migrations. See [PostgreSQL migrations](docs/postgres-migrations.md)
+for the role split and tenant-isolation model.
+
+Hosted requests require exactly one canonical UUID in
+`X-Celestin-Workspace-ID`; it selects context but is not an access grant. The
+project tool argument remains a resource selector. A read-only authorization
+connection resolves the principal, workspace, project lifecycle, membership,
+and grants; the runtime then selects only the statically configured pool for
+that resolver-issued workspace/project pair and repeats authorization in the
+project transaction. The database checks every tenant row against the protected
+login-to-project map for `session_user`; it does not trust the request header,
+tool arguments, or legacy custom GUCs for RLS scope. The API scopes are fixed to
+`memory:read` and `memory:write`: ingestion and decision saving require write
+scope and PostgreSQL write grants; search and context retrieval require read
+scope and PostgreSQL read grants. `ping` still requires an authenticated MCP
+request but no memory scope.
+
+`/healthz` is a public process health check; `/readyz` checks PostgreSQL role
+and RLS prerequisites without returning database details. Uvicorn applies a
+request-body limit, connection-pool bounds, statement/connect timeouts, a
+concurrency limit, and a short keep-alive. There is no edge or per-principal
+rate limiter, quota system, production reverse-proxy configuration, or
+monitoring/alerting setup in this repository. Do not enable non-loopback access
+until those deployment controls, TLS termination/trusted-proxy assumptions,
+secret rotation, backup/restore, and incident procedures are reviewed.
+For a hosted deployment, first provision the required no-login database group
+roles, then apply migrations with a separate owner credential. Provision the
+distinct runtime logins and one-to-one project mappings through an approved
+operator process; only consider deployment after the live security gate and
+release review pass. The command fails closed on missing Auth0/TLS
+configuration, disabled project-role isolation, an unmapped project, or unsafe
+database-role/RLS state; it does not fall back to the local SQLite server.
+Orderly Uvicorn shutdown runs the pool-close lifespan.
+
+The provisioning module has internal, workspace-admin-authorized operations,
+but no public admin API or operator CLI. Initial workspace/owner bootstrap,
+human account deactivation synchronization from Auth0, durable administrative
+audit storage, and event-driven deactivation with reconciliation are not
+implemented. Authorization changes acquire transaction-scoped exclusive
+advisory locks corresponding to the shared locks held by protected requests; an
+already-authorized operation can finish before a concurrent revocation commits.
+This does not disable token issuance at Auth0. D-08 delivery receipts/equality/
+replay and Capture-to-Evidence conversion are outside the hosted MCP path.
+
+## Optional Neon tooling for Codex
+
+This project includes project-level Neon agent skills for Postgres and Object
+Storage, plus a Neon MCP server entry configured with OAuth and pinned to
+project `restless-scene-26170162` in `.codex/config.toml`. After pulling the
+repository, restart Codex and complete Neon sign-in the first time the Neon MCP
+server is used. The project MCP entry does not store a Neon API key in the
+repository.
+
+To install these project skills or reproduce the MCP setup, use the
+officially documented commands:
+
+```powershell
+npx skills add neondatabase/agent-skills --skill neon --skill neon-postgres --skill neon-object-storage --agent codex -y
+neon mcp --oauth --project --agent codex -y
+```
+
+Neon tooling is optional and separate from Celestin's runtime; these agent
+skills and the Neon management MCP entry do not connect Celestin to Neon or
+change its storage. The local MCP commands remain SQLite-backed. The separate
+hosted command uses only the explicitly configured PostgreSQL DSN; this project
+does not configure that DSN or a Neon endpoint.
+
 
 ## Run with Codex CLI
 
@@ -314,12 +458,12 @@ overall improvement is claimed. See the [Laya results and per-query artifacts](e
 
 ## Tests
 
-Install the test dependency and run the test suite from the repository root
-(use `.[test,semantic]` to include the vector-index tests; they are skipped
-without the semantic extra):
+Install the test dependencies and run the test suite from the repository root
+(use `.[test,semantic,hosted]` to include the hosted Auth0/runtime tests; hosted
+and vector-index tests may skip when their optional extras are absent):
 
 ```sh
-python -m pip install -e ".[test,semantic]"
+python -m pip install -e ".[test,semantic,hosted]"
 python -m pytest -q
 ```
 
@@ -328,11 +472,13 @@ fake embedding provider (tests only, not semantic search). They do not require
 network access after dependencies are installed. The real-model test is opt-in
 (see above).
 
-The PostgreSQL migration runner and authorization session also have fake-based
-tests that need no server. Live PostgreSQL tests are separately marked and
-skipped by default. See [PostgreSQL integration tests](docs/postgres-integration-tests.md)
-for the disposable database requirements and explicit opt-in command. Those
-tests never create or drop a database and do not enable hosted MCP mode.
+The PostgreSQL migration runner, authorization session, hosted token verifier,
+hosted runtime composition, and provisioning operations have offline tests.
+Live PostgreSQL tests are separately marked and skipped by default. See
+[PostgreSQL integration tests](docs/postgres-integration-tests.md) for the
+disposable database requirements and explicit opt-in command. The tests never
+create or drop a database. Live PostgreSQL behavior, runtime-role grants, and
+Auth0 end-to-end behavior remain unverified in this checkout.
 
 ## Optional granular commit watcher
 

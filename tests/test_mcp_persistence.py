@@ -137,18 +137,17 @@ class MCPRepositoryIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "memory.db"
             first_adapter = PersistenceServices(db_path)
-            with patch.object(server, "_persistence_backend", first_adapter), patch.object(
-                server,
-                "project_authorizer",
-                ProjectAccessPolicy(local_access={"project-a": ["read", "write"]}),
-            ):
-                message = server.ingest_chat_message(
-                    "project-a", "conversation-1", "user", "Synthetic test message"
-                )
-                decision = server.save_decision(
-                    "project-a", "test-policy", "Keep the policy as a draft.",
-                    message["message_id"],
-                )
+            handlers = server.MCPToolHandlers(server.build_runtime(
+                project_authorizer=ProjectAccessPolicy(local_access={"project-a": ["read", "write"]}),
+                persistence_backend=first_adapter,
+            ))
+            message = handlers.ingest_chat_message(
+                "project-a", "conversation-1", "user", "Synthetic test message"
+            )
+            decision = handlers.save_decision(
+                "project-a", "test-policy", "Keep the policy as a draft.",
+                message["message_id"],
+            )
 
             # A fresh adapter instance simulates a server restart; saving the
             # same project/key must update the canonical row in place.
@@ -178,19 +177,18 @@ class MCPRepositoryIntegrationTests(unittest.TestCase):
             message = adapter.ingest_chat_message(
                 "project-a", "conversation-1", "user", "Private synthetic text"
             )
-            with patch.object(server, "_persistence_backend", adapter), patch.object(
-                server,
-                "project_authorizer",
-                ProjectAccessPolicy(local_access={
+            handlers = server.MCPToolHandlers(server.build_runtime(
+                persistence_backend=adapter,
+                project_authorizer=ProjectAccessPolicy(local_access={
                     "project-a": ["write"],
                     "project-b": ["write"],
                 }),
-            ):
-                with self.assertRaises(ToolError) as raised:
-                    server.save_decision(
-                        "project-b", "test-policy", "must not be stored",
-                        message["message_id"],
-                    )
+            ))
+            with self.assertRaises(ToolError) as raised:
+                handlers.save_decision(
+                    "project-b", "test-policy", "must not be stored",
+                    message["message_id"],
+                )
 
             error = json.loads(str(raised.exception))["error"]
             self.assertEqual(error["code"], "SOURCE_MESSAGE_NOT_FOUND")
@@ -203,13 +201,12 @@ class MCPRepositoryIntegrationTests(unittest.TestCase):
             database_directory = Path(temp_dir) / "is-a-directory"
             database_directory.mkdir()
             adapter = PersistenceServices(database_directory)
-            with patch.object(server, "_persistence_backend", adapter), patch.object(
-                server,
-                "project_authorizer",
-                ProjectAccessPolicy(local_access={"project-a": ["write"]}),
-            ):
-                with self.assertRaises(ToolError) as raised:
-                    server.ingest_chat_message("project-a", "conv", "user", "synthetic")
+            handlers = server.MCPToolHandlers(server.build_runtime(
+                persistence_backend=adapter,
+                project_authorizer=ProjectAccessPolicy(local_access={"project-a": ["write"]}),
+            ))
+            with self.assertRaises(ToolError) as raised:
+                handlers.ingest_chat_message("project-a", "conv", "user", "synthetic")
 
             payload = str(raised.exception)
             error = json.loads(payload)["error"]

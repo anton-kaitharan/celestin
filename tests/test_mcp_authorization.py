@@ -77,29 +77,28 @@ class ProjectAuthorizationTests(unittest.TestCase):
         policy = ProjectAccessPolicy(local_access={"project-a": [READ]})
         persistence = Mock()
         retrieval = Mock()
-        with (
-            patch.object(server, "project_authorizer", policy),
-            patch.object(server, "_persistence_backend", persistence),
-            patch.object(server, "_retrieval_backend", retrieval),
-        ):
-            denied_calls = (
-                lambda: server.ingest_chat_message("project-a", "conv", "user", "synthetic"),
-                lambda: server.save_decision("project-a", "k", "v", "1"),
-                lambda: server.search_chat_history("project-b", "query"),
-                lambda: server.retrieve_context("project-b", "query", 100),
-                # Direct calls through the server-facing adapters use the same
-                # authorization wrappers as the registered tool handlers.
-                lambda: server.persistence_services.ingest_chat_message(
-                    "project-b", "conv", "user", "synthetic"
-                ),
-                lambda: server.retrieval_services.search_chat_history(
-                    "project-b", "query", 10
-                ),
-            )
-            for call in denied_calls:
-                with self.subTest(call=call), self.assertRaises(ToolError) as raised:
-                    call()
-                self.assertEqual(error_code(raised.exception), "ACCESS_DENIED")
+        runtime = server.build_runtime(
+            project_authorizer=policy,
+            persistence_backend=persistence,
+            retrieval_backend=retrieval,
+        )
+        handlers = server.MCPToolHandlers(runtime)
+        denied_calls = (
+            lambda: handlers.ingest_chat_message("project-a", "conv", "user", "synthetic"),
+            lambda: handlers.save_decision("project-a", "k", "v", "1"),
+            lambda: handlers.search_chat_history("project-b", "query"),
+            lambda: handlers.retrieve_context("project-b", "query", 100),
+            # Direct calls through the runtime's server-facing adapters use the
+            # same authorization wrappers as the registered tool handlers.
+            lambda: runtime.persistence.ingest_chat_message(
+                "project-b", "conv", "user", "synthetic"
+            ),
+            lambda: runtime.retrieval.search_chat_history("project-b", "query", 10),
+        )
+        for call in denied_calls:
+            with self.subTest(call=call), self.assertRaises(ToolError) as raised:
+                call()
+            self.assertEqual(error_code(raised.exception), "ACCESS_DENIED")
 
         persistence.ingest_chat_message.assert_not_called()
         persistence.save_decision.assert_not_called()
@@ -109,12 +108,12 @@ class ProjectAuthorizationTests(unittest.TestCase):
     def test_altered_project_argument_is_denied_before_read(self) -> None:
         policy = ProjectAccessPolicy(local_access={"project-a": [READ, WRITE]})
         retrieval = Mock()
-        with (
-            patch.object(server, "project_authorizer", policy),
-            patch.object(server, "_retrieval_backend", retrieval),
-        ):
-            with self.assertRaises(ToolError) as raised:
-                server.search_chat_history("project-b", "private-term")
+        handlers = server.MCPToolHandlers(server.build_runtime(
+            project_authorizer=policy,
+            retrieval_backend=retrieval,
+        ))
+        with self.assertRaises(ToolError) as raised:
+            handlers.search_chat_history("project-b", "private-term")
         self.assertEqual(error_code(raised.exception), "ACCESS_DENIED")
         retrieval.search_chat_history.assert_not_called()
 

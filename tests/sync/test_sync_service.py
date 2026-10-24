@@ -63,6 +63,12 @@ def submission(
 def make_service(store=None, clock=None):
     return ProjectSyncService(
         store or InMemorySyncEventStore(),
+        authorizer=ProjectAccessPolicy(
+            local_access={
+                "celestin": ["read", "write"],
+                "beta": ["read", "write"],
+            }
+        ),
         clock=clock or (lambda: NOW),
     )
 
@@ -124,14 +130,44 @@ def test_scope_action_and_event_project_are_enforced():
     write_scope, read_scope = scopes()
     service = make_service()
 
-    with pytest.raises(SyncValidationError, match="does not grant write"):
+    with pytest.raises(SyncValidationError, match="selector does not request write"):
         service.publish(read_scope, submission())
     with pytest.raises(SyncValidationError, match="does not match"):
         service.publish(write_scope, submission(project="other-project"))
-    with pytest.raises(SyncValidationError, match="AuthorizedProject"):
+    with pytest.raises(SyncValidationError, match="project selector"):
         service.publish("celestin", submission())
-    with pytest.raises(SyncValidationError, match="does not grant read"):
+    with pytest.raises(SyncValidationError, match="selector does not request read"):
         service.retrieve(write_scope)
+
+
+def test_caller_constructed_scope_does_not_grant_sync_access():
+    from orbit.mcp_server.authorization import AuthorizedProject
+
+    store = InMemorySyncEventStore()
+    service = ProjectSyncService(store, authorizer=ProjectAccessPolicy(), clock=lambda: NOW)
+
+    with pytest.raises(PermissionError, match="project access denied"):
+        service.publish(AuthorizedProject("celestin", "write", None), submission())
+    assert store._events == {}
+
+
+def test_project_a_principal_cannot_retrieve_project_b_events():
+    from orbit.mcp_server.authorization import AuthenticatedPrincipal, AuthorizedProject
+
+    member = AuthenticatedPrincipal("test-issuer", "member-a")
+    store = InMemorySyncEventStore()
+    service = ProjectSyncService(
+        store,
+        authorizer=ProjectAccessPolicy(
+            principal_access={member: {"project-a": ["read", "write"]}}
+        ),
+        principal=member,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(PermissionError, match="project access denied"):
+        service.retrieve(AuthorizedProject("project-b", "read", member))
+    assert store._events == {}
 
 
 @pytest.mark.parametrize(

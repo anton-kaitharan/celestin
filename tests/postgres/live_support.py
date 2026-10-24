@@ -14,29 +14,37 @@ class UnsafePostgresTestTarget(ValueError):
 
 
 _DATABASE_NAME = re.compile(r"^celestin_it_[0-9]{8}_[a-f0-9]{8}$")
-_ROLE_NAME = re.compile(r"^celestin_it_user_[a-f0-9]{8}$")
-_UNUSABLE_TEST_DATABASES = frozenset(
-    {
-        "celestin_schema_test_v2",
-        "celestin_it_20261014_a7f3c9",
-        "celestin_it_20261015_b364bbae",
-        "celestin_it_20261015_10ac5ae9",
-    }
-)
+_ROLE_PATTERNS = {
+    "migration": re.compile(r"^celestin_it_user_[a-f0-9]{8}$"),
+    "admin": re.compile(r"^celestin_it_admin_[a-f0-9]{8}$"),
+    "authorization": re.compile(r"^celestin_it_reader_[a-f0-9]{8}$"),
+    "project_a": re.compile(r"^celestin_it_project_a_[a-f0-9]{8}$"),
+    "project_b": re.compile(r"^celestin_it_project_b_[a-f0-9]{8}$"),
+}
 _DSN_KEY = re.compile(r"^[a-z][a-z0-9_]*$")
 _DSN_VALUE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 _ALLOWED_DSN_KEYS = frozenset({"host", "port", "dbname", "user"})
 _PASSWORD_DSN_KEYS = frozenset({"password", "sslpassword"})
 _REQUIRED_ENV = (
+    "CELESTIN_TEST_POSTGRES_DISPOSABLE",
     "CELESTIN_TEST_POSTGRES_DSN",
     "CELESTIN_TEST_POSTGRES_DATABASE",
     "CELESTIN_TEST_POSTGRES_USER",
     "CELESTIN_TEST_POSTGRES_HOST",
     "CELESTIN_TEST_POSTGRES_PORT",
+    "CELESTIN_TEST_POSTGRES_ADMIN_DSN",
+    "CELESTIN_TEST_POSTGRES_ADMIN_USER",
+    "CELESTIN_TEST_POSTGRES_AUTHORIZATION_DSN",
+    "CELESTIN_TEST_POSTGRES_AUTHORIZATION_USER",
+    "CELESTIN_TEST_POSTGRES_PROJECT_A_DSN",
+    "CELESTIN_TEST_POSTGRES_PROJECT_A_USER",
+    "CELESTIN_TEST_POSTGRES_PROJECT_B_DSN",
+    "CELESTIN_TEST_POSTGRES_PROJECT_B_USER",
 )
 _IDENTITY_SQL = """
-SELECT current_database(), current_user, inet_server_addr()::text,
-       inet_server_port(), role.rolsuper, role.rolcreaterole,
+SELECT current_database(), current_user, session_user, inet_server_addr()::text,
+       inet_server_port(), database.datdba = role.oid AS owns_database,
+       role.rolsuper, role.rolcreaterole,
        role.rolcreatedb, role.rolreplication, role.rolbypassrls,
        EXISTS (
            SELECT 1
@@ -46,6 +54,8 @@ SELECT current_database(), current_user, inet_server_addr()::text,
               AND pg_catalog.pg_has_role(current_user, granted_role.oid, 'MEMBER')
        ) AS has_disallowed_memberships
   FROM pg_catalog.pg_roles AS role
+  JOIN pg_catalog.pg_database AS database
+    ON database.datname = current_database()
  WHERE role.rolname = current_user
 """
 
@@ -55,8 +65,16 @@ class PostgresTestTarget:
     """Verified connection coordinates; the secret DSN is omitted from repr."""
 
     dsn: str = field(repr=False)
+    admin_dsn: str = field(repr=False)
+    authorization_dsn: str = field(repr=False)
+    project_a_dsn: str = field(repr=False)
+    project_b_dsn: str = field(repr=False)
     database: str
     user: str
+    admin_user: str
+    authorization_user: str
+    project_a_user: str
+    project_b_user: str
     host: str
     port: int
 
@@ -78,15 +96,26 @@ def postgres_target_from_environment(
             raise UnsafePostgresTestTarget(f"{name} must be set")
         values[name] = value
 
+    if values["CELESTIN_TEST_POSTGRES_DISPOSABLE"].casefold() != "true":
+        raise UnsafePostgresTestTarget(
+            "CELESTIN_TEST_POSTGRES_DISPOSABLE must explicitly be true"
+        )
+
     database = values["CELESTIN_TEST_POSTGRES_DATABASE"]
-    if database in _UNUSABLE_TEST_DATABASES or not _DATABASE_NAME.fullmatch(database):
+    if database in {
+        "celestin_schema_test_v2",
+        "celestin_it_20261014_a7f3c9",
+        "celestin_it_20261015_b364bbae",
+        "celestin_it_20261015_10ac5ae9",
+        "celestin_it_20261015_0b8e767c",
+    } or not _DATABASE_NAME.fullmatch(database):
         raise UnsafePostgresTestTarget(
             "the test database must use celestin_it_YYYYMMDD_<8-hex-nonce> "
             "with a newly provisioned nonce"
         )
 
     user = values["CELESTIN_TEST_POSTGRES_USER"]
-    if not _ROLE_NAME.fullmatch(user):
+    if not _ROLE_PATTERNS["migration"].fullmatch(user):
         raise UnsafePostgresTestTarget(
             "the test role must use celestin_it_user_<8-hex-nonce>"
         )
@@ -109,18 +138,56 @@ def postgres_target_from_environment(
         raise UnsafePostgresTestTarget("the test port must be an integer") from None
     if not 1 <= port <= 65535:
         raise UnsafePostgresTestTarget("the test port is out of range")
-    options = _parse_test_dsn(values["CELESTIN_TEST_POSTGRES_DSN"])
-    expected = {"dbname": database, "user": user, "host": host, "port": str(port)}
-    if options != expected:
-        raise UnsafePostgresTestTarget(
-            "the password-free DSN must contain only host, port, dbname, and user "
-            "with values matching the configured target"
-        )
+    nonce = database.rsplit("_", 1)[-1]
+    role_values = {
+        "admin": values["CELESTIN_TEST_POSTGRES_ADMIN_USER"],
+        "authorization": values["CELESTIN_TEST_POSTGRES_AUTHORIZATION_USER"],
+        "project_a": values["CELESTIN_TEST_POSTGRES_PROJECT_A_USER"],
+        "project_b": values["CELESTIN_TEST_POSTGRES_PROJECT_B_USER"],
+    }
+    if len(set(role_values.values()) | {user}) != 5:
+        raise UnsafePostgresTestTarget("migration and runtime test roles must be distinct")
+    for role_kind, role_name in role_values.items():
+        if not _ROLE_PATTERNS[role_kind].fullmatch(role_name):
+            raise UnsafePostgresTestTarget(f"the {role_kind} test role name is invalid")
+        if role_name.rsplit("_", 1)[-1] != nonce:
+            raise UnsafePostgresTestTarget(
+                "the database and all test roles must use the same eight-hex nonce"
+            )
+
+    dsn_names = {
+        "migration": "CELESTIN_TEST_POSTGRES_DSN",
+        "admin": "CELESTIN_TEST_POSTGRES_ADMIN_DSN",
+        "authorization": "CELESTIN_TEST_POSTGRES_AUTHORIZATION_DSN",
+        "project_a": "CELESTIN_TEST_POSTGRES_PROJECT_A_DSN",
+        "project_b": "CELESTIN_TEST_POSTGRES_PROJECT_B_DSN",
+    }
+    for role_kind, dsn_name in dsn_names.items():
+        role_name = user if role_kind == "migration" else role_values[role_kind]
+        options = _parse_test_dsn(values[dsn_name])
+        expected = {
+            "dbname": database,
+            "user": role_name,
+            "host": host,
+            "port": str(port),
+        }
+        if options != expected:
+            raise UnsafePostgresTestTarget(
+                "each password-free DSN must match the exact configured target and its distinct role"
+            )
 
     return PostgresTestTarget(
         dsn=values["CELESTIN_TEST_POSTGRES_DSN"],
+        admin_dsn=values["CELESTIN_TEST_POSTGRES_ADMIN_DSN"],
+        authorization_dsn=values["CELESTIN_TEST_POSTGRES_AUTHORIZATION_DSN"],
+        project_a_dsn=values["CELESTIN_TEST_POSTGRES_PROJECT_A_DSN"],
+        project_b_dsn=values["CELESTIN_TEST_POSTGRES_PROJECT_B_DSN"],
         database=database,
         user=user,
+        admin_user=role_values["admin"],
+        authorization_user=role_values["authorization"],
+        project_a_user=role_values["project_a"],
+        project_b_user=role_values["project_b"],
         host=str(address),
         port=port,
     )
@@ -154,8 +221,10 @@ def verify_connection_identity(connection, target: PostgresTestTarget) -> None:
     (
         database,
         user,
+        session_user,
         host,
         port,
+        owns_database,
         is_superuser,
         can_create_roles,
         can_create_databases,
@@ -166,8 +235,10 @@ def verify_connection_identity(connection, target: PostgresTestTarget) -> None:
     if (
         database != target.database
         or user != target.user
+        or session_user != target.user
         or not server_address_matches_target(host, target.host)
         or port != target.port
+        or not owns_database
         or is_superuser
         or can_create_roles
         or can_create_databases
@@ -178,6 +249,91 @@ def verify_connection_identity(connection, target: PostgresTestTarget) -> None:
         raise UnsafePostgresTestTarget(
             "the connected PostgreSQL identity or role privileges do not match "
             "the approved local test target"
+        )
+
+
+def verify_runtime_connection_identity(
+    connection,
+    target: PostgresTestTarget,
+    *,
+    expected_user: str,
+    expected_group: str,
+) -> None:
+    """Require a direct, restricted login with exactly its approved group role."""
+    identity = connection.execute(
+        """SELECT current_database(), current_user, session_user,
+                  inet_server_addr()::text, inet_server_port(),
+                  role.rolsuper, role.rolcreaterole, role.rolcreatedb,
+                  role.rolreplication, role.rolbypassrls, role.rolinherit,
+                  pg_catalog.pg_has_role(role.oid, %s, 'MEMBER'),
+                  NOT EXISTS (
+                      SELECT 1 FROM pg_catalog.pg_roles AS inherited
+                       WHERE inherited.oid <> role.oid
+                         AND inherited.rolname NOT IN (%s, 'pg_database_owner')
+                         AND pg_catalog.pg_has_role(role.oid, inherited.oid, 'MEMBER')
+                  ),
+                   NOT EXISTS (
+                       SELECT 1 FROM pg_catalog.pg_auth_members AS membership
+                        WHERE membership.member = role.oid
+                          AND membership.admin_option
+                   ),
+                  NOT EXISTS (
+                      SELECT 1 FROM pg_catalog.pg_class AS relation
+                       WHERE relation.relnamespace = 'public'::regnamespace
+                         AND relation.relowner = role.oid
+                         AND relation.relname = ANY(%s::text[])
+                  ),
+                  NOT pg_catalog.has_schema_privilege(role.oid, 'public', 'CREATE')
+                  AND NOT pg_catalog.has_schema_privilege(
+                      role.oid, 'celestin_private', 'CREATE'
+                  )
+             FROM pg_catalog.pg_roles AS role
+            WHERE role.rolname = current_user""",
+        (
+            expected_group,
+            expected_group,
+            [
+                "chat_messages", "project_memory", "celestin_knowledge_records",
+                "celestin_evidence_records", "celestin_project_producers",
+                "celestin_project_source_namespaces", "celestin_candidates",
+                "celestin_candidate_revisions", "celestin_candidate_review_events",
+                "celestin_candidate_evidence_records", "celestin_candidate_occurrences",
+                "celestin_candidate_conversions", "celestin_users", "celestin_workspaces",
+                "celestin_workspace_memberships", "celestin_projects",
+                "celestin_project_memberships", "celestin_service_identities",
+                "celestin_service_project_grants",
+            ],
+        ),
+    ).fetchone()
+    if identity is None:
+        raise UnsafePostgresTestTarget("could not verify a configured runtime role")
+    (
+        database, current_user, session_user, host, port, is_superuser,
+        can_create_roles, can_create_databases, can_replicate, can_bypass_rls,
+        can_inherit, has_expected_group, has_no_other_groups, no_admin_option,
+        owns_no_protected_table,
+        cannot_create_private_schema_objects,
+    ) = identity
+    if (
+        database != target.database
+        or current_user != expected_user
+        or session_user != expected_user
+        or not server_address_matches_target(host, target.host)
+        or port != target.port
+        or is_superuser
+        or can_create_roles
+        or can_create_databases
+        or can_replicate
+        or can_bypass_rls
+        or not can_inherit
+        or not has_expected_group
+        or not has_no_other_groups
+        or not no_admin_option
+        or not owns_no_protected_table
+        or not cannot_create_private_schema_objects
+    ):
+        raise UnsafePostgresTestTarget(
+            "a configured runtime login does not match its isolated test role"
         )
 
 
@@ -258,20 +414,70 @@ class LivePostgres:
         self.migrations = migrations
         self.migration_result = migration_result
         self._connections: list[TrackedConnection] = []
+        self._project_dsns: dict[tuple[object, object], str] = {}
 
-    def connect(self, **kwargs) -> TrackedConnection:
-        connection = TrackedConnection(self.psycopg.connect(self.target.dsn, **kwargs))
+    def _connect(self, dsn: str, **kwargs) -> TrackedConnection:
+        connection = TrackedConnection(self.psycopg.connect(dsn, **kwargs))
         self._connections.append(connection)
         return connection
 
+    def connect(self, **kwargs) -> TrackedConnection:
+        """Open the auth-admin identity for fixture setup and revocation."""
+        return self.connect_admin(**kwargs)
+
+    def connect_admin(self, **kwargs) -> TrackedConnection:
+        return self._connect(self.target.admin_dsn, **kwargs)
+
+    def connect_authorization(self, **kwargs) -> TrackedConnection:
+        return self._connect(self.target.authorization_dsn, **kwargs)
+
+    def bind_project_scope(self, workspace_id, project_id, *, role: str) -> None:
+        if role == "project_a":
+            dsn = self.target.project_a_dsn
+        elif role == "project_b":
+            dsn = self.target.project_b_dsn
+        else:
+            raise ValueError("project role must be project_a or project_b")
+        key = (workspace_id, project_id)
+        if key in self._project_dsns:
+            raise ValueError("project scope is already bound in this test process")
+        self._project_dsns[key] = dsn
+
+    def connect_project_scope(self, workspace_id, project_id, **kwargs) -> TrackedConnection:
+        try:
+            dsn = self._project_dsns[(workspace_id, project_id)]
+        except KeyError:
+            raise UnsafePostgresTestTarget(
+                "no separately configured project login exists for this scope"
+            ) from None
+        return self._connect(dsn, **kwargs)
+
     @contextmanager
-    def connection(self, **kwargs):
-        """Open and reliably close one tracked connection."""
-        connection = self.connect(**kwargs)
+    def _connection(self, connector: Callable, **kwargs):
+        connection = connector(**kwargs)
         try:
             yield connection
         finally:
             connection.close()
+
+    @contextmanager
+    def connection(self, **kwargs):
+        """Open and reliably close one tracked auth-admin connection."""
+        with self._connection(self.connect_admin, **kwargs) as connection:
+            yield connection
+
+    @contextmanager
+    def authorization_connection(self, **kwargs):
+        with self._connection(self.connect_authorization, **kwargs) as connection:
+            yield connection
+
+    @contextmanager
+    def project_connection(self, workspace_id, project_id, **kwargs):
+        connector = lambda **options: self.connect_project_scope(
+            workspace_id, project_id, **options
+        )
+        with self._connection(connector, **kwargs) as connection:
+            yield connection
 
     def connections(self) -> tuple[TrackedConnection, ...]:
         return tuple(self._connections)

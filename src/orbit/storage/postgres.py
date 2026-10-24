@@ -9,6 +9,7 @@ the adapter never connects or runs migrations.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Protocol
 from uuid import UUID
@@ -31,6 +32,7 @@ from .protocol import (
     StoredDecision,
     StoredMessage,
 )
+from orbit.mcp_server.hosted_scope import HostedAccessDenied, ResolvedProjectScope
 
 
 class _PostgresConnection(Protocol):
@@ -57,10 +59,37 @@ class PostgresMemoryStore(MemoryStore):
         except (TypeError, ValueError, AttributeError) as exc:
             raise ValueError("workspace_id must be a UUID") from exc
         self._connection_factory = connection_factory
+        self._request_connection = None
+        self._request_scope: ResolvedProjectScope | None = None
+
+    @classmethod
+    def _for_request(
+        cls, connection: Any, scope: ResolvedProjectScope
+    ) -> PostgresMemoryStore:
+        """Bind persistence to an already-authorized request transaction.
+
+        The returned adapter borrows the connection: it never acquires,
+        commits, rolls back, or closes it. The authorization factory owns that
+        lifecycle. The resolver-issued scope supplies both tenant IDs.
+        """
+        if connection is None or not callable(getattr(connection, "execute", None)):
+            raise TypeError("connection must provide execute()")
+        if not isinstance(scope, ResolvedProjectScope):
+            raise TypeError("scope must be issued by HostedScopeResolver")
+        store = cls.__new__(cls)
+        store._workspace_id = str(scope.workspace_id)
+        store._connection_factory = None
+        store._request_connection = connection
+        store._request_scope = scope
+        return store
 
     @classmethod
     def from_dsn(cls, dsn: str, workspace_id: str | UUID) -> PostgresMemoryStore:
-        """Build an adapter that imports psycopg only when an operation runs."""
+        """Build an explicitly standalone adapter; it does not authorize callers.
+
+        Hosted request code must use the request unit of work instead. This
+        factory remains for trusted single-workspace tooling and adapter tests.
+        """
         if not isinstance(dsn, str) or not dsn.strip():
             raise ValueError("dsn must be a non-empty string")
 
@@ -84,8 +113,10 @@ class PostgresMemoryStore(MemoryStore):
         if not isinstance(content, str):
             raise ValidationError("content must be a string")
 
-        with self._connection_factory() as connection:
+        self._check_request_scope(project, "write")
+        with self._connection() as connection:
             project_id = self._resolve_project(connection, project)
+            self._bind_standalone_scope(connection, project_id)
             row = connection.execute(
                 """
                 INSERT INTO chat_messages
@@ -128,8 +159,10 @@ class PostgresMemoryStore(MemoryStore):
         status = validate_status(status)
         source_id = _postgres_message_id(source_message_id)
 
-        with self._connection_factory() as connection:
+        self._check_request_scope(project, "write")
+        with self._connection() as connection:
             project_id = self._resolve_project(connection, project)
+            self._bind_standalone_scope(connection, project_id)
             source = connection.execute(
                 """
                 SELECT 1
@@ -178,8 +211,10 @@ class PostgresMemoryStore(MemoryStore):
         project = validate_project(project)
         key = validate_key(key)
         status = validate_status(status)
-        with self._connection_factory() as connection:
+        self._check_request_scope(project, "write")
+        with self._connection() as connection:
             project_id = self._resolve_project(connection, project)
+            self._bind_standalone_scope(connection, project_id)
             row = connection.execute(
                 """
                 UPDATE project_memory
@@ -201,6 +236,9 @@ class PostgresMemoryStore(MemoryStore):
             return _stored_decision(project, row)
 
     def _resolve_project(self, connection: _PostgresConnection, project: str) -> str:
+        if self._request_scope is not None:
+            self._check_request_scope(project, "write")
+            return str(self._request_scope.project_id)
         row = connection.execute(
             """
             SELECT id::text
@@ -214,6 +252,37 @@ class PostgresMemoryStore(MemoryStore):
         if row is None:
             raise ProjectNotFoundError
         return str(row[0])
+
+    def _check_request_scope(self, project: str, permission: str) -> None:
+        scope = self._request_scope
+        if scope is None:
+            return
+        if project != scope.project_key or permission not in scope.permissions:
+            raise HostedAccessDenied("access denied")
+
+    def _bind_standalone_scope(self, connection: _PostgresConnection, project_id: str) -> None:
+        """Set RLS context for trusted standalone use inside its owned transaction."""
+        if self._request_scope is not None:
+            return
+        cursor = connection.execute(
+            """
+            SELECT set_config('celestin.workspace_id', %s, true),
+                   set_config('celestin.project_id', %s, true)
+            """,
+            (self._workspace_id, project_id),
+        )
+        close = getattr(cursor, "close", None)
+        if callable(close):
+            close()
+
+    @contextmanager
+    def _connection(self):
+        """Borrow request connection or preserve standalone ownership semantics."""
+        if self._request_connection is not None:
+            yield self._request_connection
+            return
+        with self._connection_factory() as connection:
+            yield connection
 
 
 def _postgres_message_id(source_message_id: str) -> int:

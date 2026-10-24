@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterable
 
 from .fts import SearchResult
+from .knowledge_state import KnowledgeStateEnvelope
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +23,7 @@ class RetrievalCandidate:
     relevance_score: float
     record_kind: str
     status: str | None = None
+    knowledge_state: KnowledgeStateEnvelope | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         for field_name in ("record_id", "project_id", "content"):
@@ -51,6 +53,11 @@ class RetrievalCandidate:
         if self.timestamp is not None and not isinstance(self.timestamp, str):
             raise TypeError("timestamp must be a string or None")
         _timestamp_key(self.timestamp)
+        if self.knowledge_state is not None:
+            if not isinstance(self.knowledge_state, KnowledgeStateEnvelope):
+                raise TypeError("knowledge_state must be a KnowledgeStateEnvelope or None")
+            if self.knowledge_state.project_id != self.project_id:
+                raise ValueError("knowledge_state project_id must match the candidate project_id")
 
     @classmethod
     def from_message_search_result(cls, result: SearchResult) -> RetrievalCandidate:

@@ -8,13 +8,14 @@ version = "0.2.0"
 description = "An MCP-powered persistent memory system for AI agents and coding assistants."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["mcp>=1.0,<2.0"]
+dependencies = ["mcp>=1.0,<2.0", "rfc8785>=0.1.4,<0.2"]
 
 [project.scripts]
 celestin = "orbit.mcp_server.server:main"
 celestin-index = "orbit.semantic.cli:main"
 celestin-docs = "orbit.pageindex.cli:main"
 celestin-migrate = "orbit.postgres.migrate_cli:main"
+celestin-hosted = "orbit.mcp_server.hosted_server:main"
 # Compatibility aliases for clients configured before the Celestin rename.
 orbit = "orbit.mcp_server.server:main"
 memory-bridge = "orbit.mcp_server.server:main"
@@ -24,6 +25,11 @@ semantic = ["sqlite-vec>=0.1.9,<0.2", "fastembed>=0.9,<1.0"]
 pageindex = ["pageindex>=0.4,<0.5"]
 test = ["pytest"]
 postgres = ["psycopg[binary]>=3.2,<4"]
+hosted = [
+    "PyJWT[crypto]>=2.10,<3",
+    "psycopg[binary,pool]>=3.2,<4",
+    "uvicorn>=0.30,<1",
+]
 system1 = [
     "torch>=2.6; python_version >= '3.11' and python_version < '3.14'",
     "transformers>=5.0,<5.1; python_version >= '3.11' and python_version < '3.14'",
