@@ -1,7 +1,7 @@
 # Shared-Memory Interface Contract v0.3 — Final Decision Record
 
-**Status:** Final implementation baseline, authorized by the requester  
-**Date:** 2026-10-19  
+**Status:** Final implementation baseline, authorized by the requester
+**Date:** 2026-10-19
 **Scope:** First PostgreSQL-backed Evidence/Knowledge conversion and its producer, authorization, and MCP boundaries
 
 This record resolves the v0.3 review questions for implementation. It supersedes the `PROPOSED` and `UNRESOLVED` labels in the [boundary review](RESURRECTION_INTERFACE_BOUNDARY_REVIEW.md) for the decisions below. It records the requester's decisions; it does not claim that an absent teammate has already acknowledged them. A teammate or their agent can respond **Accept**, **Reject**, or **Modify** against this concrete baseline.

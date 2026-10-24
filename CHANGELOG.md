@@ -4,6 +4,13 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-10-24T07:29:16+05:30 — Merge current main into the hosted-tenancy PR branch
+
+- Changed: Merged the current `origin/main` history into `codex/celestin-hosted-tenancy-spike`. Resolved the PR conflict set while retaining both branches' dated AI/changelog records, using the current PostgreSQL integration guide and safety checks, preserving the Neon skill lock entries, and retaining the additional project fixture.
+- Why: Bring PR #21 up to date with main without dropping the branch's four intended changes or importing a conflicting history rewrite.
+- Validation: Focused PostgreSQL support/auth suite — 73 passed, 21 live cases skipped. Broad suite excluding `tests/evidence/test_canonicalization.py` — 769 passed, 48 skipped, 1 warning. Source and test compilation and diff checks were run separately.
+- Limitations: The unfiltered suite cannot collect the canonicalization tests because `rfc8785` is unavailable in this validation environment. Live PostgreSQL cases were skipped because no approved disposable target is configured; no database, migration, or Auth0 operation was performed.
+
 ## 2026-10-23T22:00:35+05:30 — Separate Evidence adapter tests from the hosted RLS gate
 
 - Changed: Assigned the adapter-level Evidence suite its own pytest marker and documented its exact opt-in command separately from project-login authorization/RLS acceptance. Clarified that these tests currently use a control-plane connection and do not prove project-runtime Evidence access.
@@ -386,6 +393,13 @@ Record each meaningful project change during the event, newest first. Update thi
 - Validation: Pending local documentation and regression checks.
 - Limitations: Team handoff audit observations require verification against the merged code; this documentation reconciliation does not change application behavior.
 
+## 2026-10-16T14:09:31+05:30 — Add project-scoped Neon developer tooling
+
+- Changed: Installed the Neon and Neon PostgreSQL agent skills in `.agents/skills/`, added `.codex/config.toml` for the Neon OAuth MCP server pinned to the existing `celestin-dev` project, and documented the optional developer connection in the README.
+- Why: Make Neon project inspection available in this checkout without creating cloud resources or selecting Neon as Celestin's application database.
+- Validation: Neon CLI authentication and read-only project, branch, database, region, and Postgres-version metadata checks succeeded. `git diff --check` and `git diff --cached --check` passed. MCP tool connectivity was not yet available in the active Codex session; it requires reopening the project and completing first-use OAuth if prompted. No database connection or migration was run.
+- Limitations: The MCP OAuth handshake has not completed in this session. The PostgreSQL adapter remains unselected by the MCP server, and retrieval remains SQLite-backed.
+
 ## 2026-10-16T13:58:26+05:30 — Add project-scoped Neon agent tooling
 
 - Changed: Added the Neon, Neon Postgres, and Neon Object Storage agent skills under `.agents/skills/`; configured the project Codex Neon MCP server using OAuth in `.codex/config.toml`; added the skill source lock file and README setup notes.
@@ -406,6 +420,27 @@ Record each meaningful project change during the event, newest first. Update thi
 - Why: Reconstruction previously ignored Capability 3 conflict links and could downgrade a saved stale knowledge status to unverified when its source path existed.
 - Validation: Baseline affected suite: 353 passed, 5 errors, 1 warning. The five errors are the known `DecisionRepository` `NameError` in `tests/retrieval/test_strategies.py`. Post-change project-state tests: 20 passed. Affected capture/evidence/project-state/sync/integration/retrieval (excluding that known failing module)/MCP-handler suite: 355 passed, 1 warning. `git diff --check` passed.
 - Limitations: Legacy retrieval does not consume Capability 1 knowledge and its DTO has no verification, freshness, or conflict metadata. The MCP stdio timeout was not part of this focused baseline.
+
+## 2026-10-15T22:06:50+05:30 — Block previously used PostgreSQL test targets
+
+- Changed: The live-test target parser now rejects the two previously used disposable database names in addition to the older failed target. The PostgreSQL integration guide lists all three retired targets and says not to reuse them.
+- Why: Those prior names otherwise satisfy the nonce format and could be accidentally selected for another migration run.
+- Validation: PostgreSQL non-live subset: 80 passed; full suite with `--import-mode=importlib` reported 464 passed, 38 skipped, and one Windows symlink test failure (`WinError 1314`); rerun excluding that environment-dependent test: 466 passed, 38 skipped, 1 deselected. `git diff --check` passed. No live PostgreSQL connection or test was run.
+- Limitations: Real PostgreSQL authorization and cursor cleanup remain unverified. A fresh, owner-approved database and role are still required.
+
+## 2026-10-15T21:55:54+05:30 — Reuse project keys across workspace fixtures
+
+- Changed: Updated the live authorization fixture so projects in separate workspaces share the same `legacy_project_key`, while another project in the first workspace keeps a distinct key.
+- Why: Exercise that public project-key resolution stays workspace-scoped when the same key exists in multiple workspaces.
+- Validation: `git diff --check` passed. No live PostgreSQL test was run because this change is in the live fixture and no newly approved disposable target was available.
+- Limitations: The fixture behavior still needs verification in an authorized live PostgreSQL run; no production authorization behavior changed.
+
+## 2026-10-15T21:52:27+05:30 — Close tracked PostgreSQL cursors in live-test cleanup
+
+- Changed: `TrackedConnection.close()` now closes tracked open cursors, continues attempting remaining cursors if one close fails, and closes the underlying connection in a `finally` block. Added non-live coverage for idempotent closure and cleanup-error handling.
+- Why: Live integration assertions intentionally verify both connection and cursor cleanup; Psycopg connection closure alone does not satisfy the tracked cursor checks.
+- Validation: `tests/postgres/test_live_support.py` — 47 passed; complete `tests/postgres` suite — 78 passed, 18 skipped; `git diff --check` passed. No PostgreSQL connection or live test was run.
+- Limitations: Scripted tests verify the tracking helper’s behavior; this change does not independently establish live Psycopg/PostgreSQL behavior.
 
 ## 2026-10-15T21:27:22+05:30 — Document retrieval content trust boundary
 

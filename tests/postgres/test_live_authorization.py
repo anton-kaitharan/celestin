@@ -155,6 +155,12 @@ def tenant_fixture(postgres_connections):
 
         for project_id, workspace_id, slug, legacy_key in (
             (ids["project_a"], ids["workspace_a"], f"project-a-{suffix}", project_key),
+            (
+                ids["project_other"],
+                ids["workspace_a"],
+                f"project-other-{suffix}",
+                f"other-key-{suffix}",
+            ),
             (ids["project_b"], ids["workspace_b"], f"project-b-{suffix}", project_key),
         ):
             connection.execute(
