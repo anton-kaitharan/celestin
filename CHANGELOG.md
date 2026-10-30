@@ -4,6 +4,13 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-10-30T14:06:27+05:30 — Audit shared-storage platform readiness
+
+- Changed: Added `docs/shared-storage-readiness.md` with the verified local/hosted architecture, storage capability register, migration and isolation limits, operations gaps, and a bounded SQLite Evidence implementation candidate.
+- Why: Establish current source and offline-test evidence before changing the shared-storage foundation.
+- Validation: Offline baseline on `origin/main`: selected full storage/runtime suite 1,044 passed, 4 failed, 6 skipped; focused storage/runtime subset 974 passed, 6 skipped. The four full-selection failures are recorded in the report. `git diff --check`, cached diff check, report whitespace scan, and relative Markdown link scan passed.
+- Limitations: No source or schema changed in this milestone. No database, SQL, migration, provider, external service, or deployment operation occurred. No live PostgreSQL behavior is verified.
+
 ## 2026-10-24T21:30:00+05:30 — Add typed knowledge read result boundary
 
 - Changed: Added `orbit.project_state.knowledge_read` (`KnowledgeReadResult`, outcome/coverage/failure/record-issue enums and types) and `tests/project_state/test_knowledge_read.py`. Outcome (succeeded, failed, scope mismatch), coverage (unknown, partial, reported complete), record-level issues, and limitations are separate fields; empty success differs from failure; there is no "verified complete" status.
