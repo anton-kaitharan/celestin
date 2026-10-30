@@ -14,9 +14,11 @@ from .model import (
     VerificationStatus,
 )
 from .service import EvidenceLinkedMemoryService
+from .sqlite import SQLiteEvidenceLinkedMemoryStore
 
 __all__ = [
     "EvidenceLinkedMemoryService",
+    "SQLiteEvidenceLinkedMemoryStore",
     "CaptureKnowledgeProvenance",
     "CaptureSourceProvenance",
     "EvidenceRecord",

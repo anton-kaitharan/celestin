@@ -4,6 +4,13 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-10-30T14:23:20+05:30 — Add local SQLite Evidence storage
+
+- Changed: Added local schema migration 3, `SQLiteEvidenceLinkedMemoryStore`, and real temporary-file conformance/schema tests for the existing Evidence/Knowledge storage port. Corrected the shared supersession fault fixture to include its required predecessor ID and updated current storage documentation.
+- Why: Make the existing manual Evidence/Knowledge storage contract usable on local SQLite without producer, delivery, conversion, MCP, or hosted-security assumptions.
+- Validation: New SQLite Evidence tests: 14 passed. Focused storage/runtime suite: 988 passed, 6 skipped (optional PageIndex/sqlite-vec dependencies unavailable). Broader selected suite: 1,059 passed, 3 failed, 6 skipped; the failures are the known Windows project-state symlink/JSON cases. Six changed Python files compiled in memory; Markdown link scan, `git diff --check`, and `git diff --cached --check` passed.
+- Limitations: Adapter is not wired into MCP. No Capture occurrence-to-Evidence association or producer conversion is implemented. PostgreSQL remains fake-tested only; no PostgreSQL connection or migration was run. Local tests exercised migration 3 only against temporary SQLite files.
+
 ## 2026-10-30T14:06:27+05:30 — Audit shared-storage platform readiness
 
 - Changed: Added `docs/shared-storage-readiness.md` with the verified local/hosted architecture, storage capability register, migration and isolation limits, operations gaps, and a bounded SQLite Evidence implementation candidate.
