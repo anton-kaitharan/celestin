@@ -119,7 +119,7 @@ def migration(version: int, sql: str = "CREATE TEST;", name: str | None = None) 
 
 def test_packaged_baseline_is_ordered_and_distinct_from_schema_draft():
     migrations = load_migrations()
-    assert [item.version for item in migrations] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert [item.version for item in migrations] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     assert migrations[0].name == "0001_hosted_baseline.sql"
     assert "CREATE TABLE celestin_users" in migrations[0].sql
     assert "BEGIN;" not in migrations[0].sql
@@ -224,6 +224,31 @@ def test_packaged_baseline_is_ordered_and_distinct_from_schema_draft():
     assert "public.celestin_workspace_memberships" in migration_nine.sql
     assert "pg_advisory_xact_lock_shared" in migration_nine.sql
     assert "pg_advisory_xact_lock(" in migration_nine.sql
+
+    migration_ten = migrations[9]
+    assert migration_ten.name == "0010_project_runtime_evidence_grants.sql"
+    assert "BEGIN;" not in migration_ten.sql
+    assert "COMMIT;" not in migration_ten.sql
+    normalized_ten = " ".join(migration_ten.sql.split())
+    assert "migration identity must own both Evidence tables" in migration_ten.sql
+    assert "unexpected Evidence column ACL" in migration_ten.sql
+    assert "unexpected Evidence table ACL grantee" in migration_ten.sql
+    assert "migration identity must be separate from hosted runtime groups" in migration_ten.sql
+    assert "pg_has_role" in migration_ten.sql
+    assert "REVOKE ALL PRIVILEGES ON TABLE public.celestin_knowledge_records, public.celestin_evidence_records" in normalized_ten
+    assert "FROM PUBLIC, celestin_project_runtime, celestin_authorization_reader, celestin_authorization_admin" in normalized_ten
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.celestin_knowledge_records, public.celestin_evidence_records TO celestin_project_runtime" in normalized_ten
+    assert migration_ten.sql.upper().count("GRANT ") == 1
+    assert "GRANT USAGE ON SCHEMA" not in migration_ten.sql.upper()
+    assert "GRANT USAGE, SELECT ON SEQUENCE" not in migration_ten.sql.upper()
+    assert "GRANT CELESTIN_PROJECT_RUNTIME TO" not in migration_ten.sql.upper()
+    assert "CREATE ROLE" not in migration_ten.sql.upper()
+    assert "ALTER ROLE" not in migration_ten.sql.upper()
+    assert "ALTER OWNER" not in migration_ten.sql.upper()
+    assert "ALTER TABLE" not in migration_ten.sql.upper()
+    assert "CREATE POLICY" not in migration_ten.sql.upper()
+    assert "ENABLE ROW LEVEL SECURITY" not in migration_ten.sql.upper()
+    assert "FORCE ROW LEVEL SECURITY" not in migration_ten.sql.upper()
 
 
 def test_candidate_revision_migration_defines_scoped_history_and_ordered_occurrences():

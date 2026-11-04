@@ -76,6 +76,15 @@ PROTECTED_TABLES = (
     "celestin_candidate_occurrences",
     "celestin_candidate_conversions",
 )
+EVIDENCE_RUNTIME_TABLES = (
+    "celestin_knowledge_records",
+    "celestin_evidence_records",
+)
+PROJECT_RUNTIME_UNEXPOSED_TABLES = tuple(
+    table
+    for table in PROTECTED_TABLES
+    if table not in ("chat_messages", "project_memory", *EVIDENCE_RUNTIME_TABLES)
+)
 AUTHORIZATION_TABLES = (
     "celestin_users",
     "celestin_workspaces",
@@ -2665,18 +2674,282 @@ def _assert_safe_project_runtime(
             UUID(int=scope[0].int ^ 1), scope[1],
             scope[0], UUID(int=scope[0].int ^ 1),
             auth_tables,
-            list(PROTECTED_TABLES[2:]) + ["celestin_schema_migrations"],
+            list(PROJECT_RUNTIME_UNEXPOSED_TABLES) + ["celestin_schema_migrations"],
             tenant_tables,
             list(PROTECTED_TABLES + AUTHORIZATION_TABLES + ("celestin_schema_migrations",)),
         ),
     )
     _validate_project_runtime_probe(row)
+    _assert_evidence_runtime_privilege_profile(pool, timeout)
     _assert_advisory_lock_privileges(
         pool, timeout, role_profile="project_runtime"
     )
     _assert_expected_policy_catalog(pool, timeout)
     _assert_authorization_function_catalog(pool, timeout, project_runtime=True)
     _assert_expected_trigger_catalog(pool, timeout)
+
+
+def _evidence_runtime_privilege_catalog_query() -> str:
+    """Inspect effective Evidence access and the exact table/column ACLs."""
+    return """
+        /* celestin_evidence_runtime_privilege_catalog */
+        SELECT relation.relname,
+               relation.relowner::bigint,
+               owner_role.rolname,
+               runtime_role.oid::bigint,
+               runtime_role.rolname,
+               (
+                   runtime_role.oid IS NOT NULL
+                   AND reader_role.oid IS NOT NULL
+                   AND admin_role.oid IS NOT NULL
+                   AND owner_role.oid NOT IN (
+                       runtime_role.oid, reader_role.oid, admin_role.oid
+                   )
+                   AND NOT pg_catalog.pg_has_role(
+                       owner_role.oid, runtime_role.oid, 'MEMBER'
+                   )
+                   AND NOT pg_catalog.pg_has_role(
+                       owner_role.oid, reader_role.oid, 'MEMBER'
+                   )
+                   AND NOT pg_catalog.pg_has_role(
+                       owner_role.oid, admin_role.oid, 'MEMBER'
+                   )
+               ) AS owner_is_separate_from_hosted_runtime_roles,
+               login_role.oid::bigint,
+               login_role.rolname,
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'SELECT'),
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'INSERT'),
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'UPDATE'),
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'DELETE'),
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'TRUNCATE'),
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'TRIGGER'),
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'REFERENCES'),
+               COALESCE((
+                   SELECT pg_catalog.jsonb_agg(
+                       pg_catalog.jsonb_build_object(
+                           'grantor_oid', acl.grantor::bigint,
+                           'grantor_name', pg_catalog.pg_get_userbyid(acl.grantor),
+                           'grantee_oid', acl.grantee::bigint,
+                           'grantee_name', CASE
+                               WHEN acl.grantee = 0 THEN 'PUBLIC'
+                               ELSE pg_catalog.pg_get_userbyid(acl.grantee)
+                           END,
+                           'privilege_type', acl.privilege_type,
+                           'is_grantable', acl.is_grantable
+                       ) ORDER BY acl.grantee, acl.grantor, acl.privilege_type
+                   )::text
+                     FROM pg_catalog.aclexplode(
+                         COALESCE(
+                             relation.relacl,
+                             pg_catalog.acldefault('r', relation.relowner)
+                         )
+                     ) AS acl
+               ), '[]') AS table_acl_entries,
+               EXISTS (
+                   SELECT 1
+                     FROM pg_catalog.pg_attribute AS attribute
+                    WHERE attribute.attrelid = relation.oid
+                      AND attribute.attnum > 0
+                      AND NOT attribute.attisdropped
+                      AND attribute.attacl IS NOT NULL
+               ) AS has_column_acl
+          FROM pg_catalog.pg_class AS relation
+          JOIN pg_catalog.pg_namespace AS namespace
+            ON namespace.oid = relation.relnamespace
+          JOIN pg_catalog.pg_roles AS owner_role
+            ON owner_role.oid = relation.relowner
+          JOIN pg_catalog.pg_roles AS login_role
+            ON login_role.rolname = current_user
+          LEFT JOIN pg_catalog.pg_roles AS runtime_role
+            ON runtime_role.rolname = %s
+          LEFT JOIN pg_catalog.pg_roles AS reader_role
+            ON reader_role.rolname = 'celestin_authorization_reader'
+          LEFT JOIN pg_catalog.pg_roles AS admin_role
+            ON admin_role.rolname = 'celestin_authorization_admin'
+         WHERE namespace.nspname = 'public'
+           AND relation.relname = ANY(%s::text[])
+           AND relation.relkind = 'r'
+         ORDER BY relation.relname
+    """
+
+
+def _assert_evidence_runtime_privilege_profile(pool, timeout: float) -> None:
+    """Require the reviewed Evidence table grants before hosted readiness."""
+    cursor = None
+    try:
+        with pool.connection(timeout=timeout) as connection:
+            cursor = connection.execute(
+                _evidence_runtime_privilege_catalog_query(),
+                (PROJECT_RUNTIME_ROLE, list(EVIDENCE_RUNTIME_TABLES)),
+            )
+            rows = cursor.fetchall()
+    except Exception:
+        raise RuntimeError(
+            "PostgreSQL Evidence table privileges could not be verified"
+        ) from None
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                raise RuntimeError(
+                    "PostgreSQL Evidence privilege cursor could not be closed"
+                ) from None
+    _validate_evidence_runtime_privilege_catalog(rows)
+
+
+def _validate_evidence_runtime_privilege_catalog(rows) -> None:
+    """Validate exact effective and ACL state for both Evidence tables.
+
+    The table owner retains its inherent ownership ACL. The only permitted
+    non-owner ACL is a non-grantable SELECT/INSERT/UPDATE grant to the existing
+    project-runtime group. Effective checks run as the exact project login.
+    """
+    expected_tables = set(EVIDENCE_RUNTIME_TABLES)
+    expected_runtime_privileges = {"SELECT", "INSERT", "UPDATE"}
+    owner_privileges = {
+        "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES",
+        "TRIGGER", "MAINTAIN",
+    }
+    owner_privilege_sets = (
+        set(),
+        owner_privileges - {"MAINTAIN"},
+        owner_privileges,
+    )
+    expected_effective = (True, True, True, False, False, False, False)
+    acl_fields = {
+        "grantor_oid", "grantor_name", "grantee_oid", "grantee_name",
+        "privilege_type", "is_grantable",
+    }
+    actual_tables = {}
+    owner_identity = None
+    try:
+        if not isinstance(rows, (list, tuple)):
+            raise ValueError("catalog rows are missing")
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) != 17:
+                raise ValueError("catalog row has an unexpected shape")
+            (
+                table_name,
+                owner_oid,
+                owner_name,
+                runtime_oid,
+                runtime_name,
+                owner_is_separate,
+                login_oid,
+                login_name,
+                *properties,
+            ) = row
+            if (
+                not isinstance(table_name, str)
+                or table_name not in expected_tables
+                or table_name in actual_tables
+                or type(owner_oid) is not int
+                or owner_oid <= 0
+                or not isinstance(owner_name, str)
+                or not owner_name
+                or type(runtime_oid) is not int
+                or runtime_oid <= 0
+                or runtime_name != PROJECT_RUNTIME_ROLE
+                or type(owner_is_separate) is not bool
+                or not owner_is_separate
+                or type(login_oid) is not int
+                or login_oid <= 0
+                or not isinstance(login_name, str)
+                or not login_name
+                or owner_oid in {runtime_oid, login_oid}
+                or runtime_oid == login_oid
+            ):
+                raise ValueError("catalog identity is missing or inconsistent")
+            effective = tuple(properties[:7])
+            acl_json, has_column_acl = properties[7:]
+            if (
+                len(properties) != 9
+                or any(type(value) is not bool for value in effective)
+                or effective != expected_effective
+                or type(has_column_acl) is not bool
+                or has_column_acl
+                or not isinstance(acl_json, str)
+            ):
+                raise ValueError("effective privileges or column ACLs are unsafe")
+
+            entries = json.loads(acl_json)
+            if not isinstance(entries, list):
+                raise ValueError("table ACL entries are missing")
+            seen_entries = set()
+            owner_entries = set()
+            runtime_entries = set()
+            for entry in entries:
+                if not isinstance(entry, Mapping) or set(entry) != acl_fields:
+                    raise ValueError("table ACL entry has an unexpected shape")
+                grantor_oid = entry["grantor_oid"]
+                grantor_name = entry["grantor_name"]
+                grantee_oid = entry["grantee_oid"]
+                grantee_name = entry["grantee_name"]
+                privilege = entry["privilege_type"]
+                grantable = entry["is_grantable"]
+                if (
+                    type(grantor_oid) is not int
+                    or grantor_oid <= 0
+                    or not isinstance(grantor_name, str)
+                    or not grantor_name
+                    or type(grantee_oid) is not int
+                    or grantee_oid < 0
+                    or not isinstance(grantee_name, str)
+                    or not grantee_name
+                    or privilege not in owner_privileges
+                    or type(grantable) is not bool
+                ):
+                    raise ValueError("table ACL metadata is incomplete")
+                key = (
+                    grantor_oid, grantor_name, grantee_oid, grantee_name,
+                    privilege, grantable,
+                )
+                if key in seen_entries:
+                    raise ValueError("duplicate table ACL entry")
+                seen_entries.add(key)
+
+                if grantee_oid == owner_oid:
+                    if (
+                        grantor_oid != owner_oid
+                        or grantor_name != owner_name
+                        or grantee_name != owner_name
+                        or not grantable
+                    ):
+                        raise ValueError("owner ACL identity is inconsistent")
+                    owner_entries.add(privilege)
+                elif grantee_oid == runtime_oid:
+                    if (
+                        grantor_oid != owner_oid
+                        or grantor_name != owner_name
+                        or grantee_name != runtime_name
+                        or privilege not in expected_runtime_privileges
+                        or grantable
+                    ):
+                        raise ValueError("project-runtime ACL grant is unsafe")
+                    runtime_entries.add(privilege)
+                else:
+                    # Rejects PUBLIC, direct login grants, auth roles, and all
+                    # unreviewed grantees regardless of effective access.
+                    raise ValueError("unexpected Evidence table grantee")
+
+            if (
+                owner_entries not in owner_privilege_sets
+                or runtime_entries != expected_runtime_privileges
+            ):
+                raise ValueError("Evidence table ACL does not match the exact profile")
+            actual_tables[table_name] = True
+            if owner_identity is None:
+                owner_identity = (owner_oid, owner_name)
+            elif owner_identity != (owner_oid, owner_name):
+                raise ValueError("Evidence table owners do not match")
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            "PostgreSQL Evidence table privilege profile is unsafe"
+        ) from None
+
+    if set(actual_tables) != expected_tables:
+        raise RuntimeError("PostgreSQL Evidence table privilege profile is unsafe")
 
 
 def _run_pool_probe(pool, timeout: float, query: str, params: tuple[Any, ...]):

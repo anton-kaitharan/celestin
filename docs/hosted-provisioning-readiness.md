@@ -14,6 +14,8 @@ The API has no field for a DSN, password, token, or other credential. Diagnostic
 - **Request runtime** evaluates only the project-runtime and authorization-reader profiles, their role probe and advisory ACL rows, plus RLS, function, and trigger catalogs. It does not invoke privileged authorization-admin or migration operations.
 - **Privileged preflight** separately evaluates the authorization-admin and migration profiles, the configured direct membership roster, and shared policy/trigger catalogs. It is an assessment only, not an operator execution path.
 
+The offline evidence-bundle model does not currently carry the dedicated Evidence-table ACL rows. Its structural result therefore does not establish the exact Evidence runtime grant profile. The actual hosted project-pool startup check independently inspects effective privileges and table ACL catalog entries for both Evidence tables; the offline assessment must not be presented as validating that profile.
+
 The profile inventory names match the current hosted readiness profiles: `project_runtime`, `authorization_reader`, `authorization_admin`, and `migration`. The configured group-member roster is compared exactly with the supplied privileged-role catalog rows. Other project runtime logins may be included in that explicit roster.
 
 `profile_structure_status: STRUCTURAL_PASS` means supplied row shapes and values passed the source-level validators except for the explicitly diagnosed unverified lock-scope gate. `status: BLOCKED` remains the full profile result whenever that gate or any other required check fails. A structural pass must not be described as a live-ready result.

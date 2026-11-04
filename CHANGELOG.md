@@ -4,6 +4,13 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-11-04T20:14:07+05:30 — Define the hosted Evidence runtime grant profile
+
+- Changed: Added forward-only migration `0010_project_runtime_evidence_grants.sql`, which preflights table ownership, hosted group-role safety, unexpected table/column ACLs, revokes existing PUBLIC/hosted-group table grants, and grants only SELECT/INSERT/UPDATE on the Knowledge and Evidence tables to `celestin_project_runtime`. Hosted request readiness now validates effective permissions and the exact table ACL profile, including owner separation, grantor/grantee, grant-option, and column-ACL checks. Updated PostgreSQL readiness documentation and the offline schema-version fixture.
+- Why: The request-scoped PostgreSQL Evidence adapter needs narrowly scoped table privileges; forced RLS remains the row-scope control and must remain in force.
+- Validation: Offline hosted readiness, migration-runner, and live-test-safety suites: 596 passed. Focused profile/migration checks: 30 passed. Three changed Python files compiled in memory; working and cached Git diff checks passed.
+- Limitations: Migration 0010 was not applied and no PostgreSQL connection or SQL execution occurred. Hosted Evidence service composition and guarded live validation remain separate prerequisites; hosted serving is still gated.
+
 ## 2026-11-04T18:31:11+05:30 — Assert persisted Evidence verification state
 
 - Changed: Strengthened the real-SQLite local application workflow test to reload the Knowledge bundle through `EvidenceLinkedMemoryService` after verification and assert persisted verification status and verifier for both Knowledge and its attached Evidence.

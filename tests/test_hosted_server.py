@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import replace
@@ -51,6 +52,7 @@ from orbit.mcp_server.hosted_server import (
     _create_pool,
     _reset_postgres_pool_connection,
     _validate_advisory_lock_privilege_catalog,
+    _validate_evidence_runtime_privilege_catalog,
     _validate_trigger_catalog,
     _assert_expected_trigger_catalog,
     _validate_function_catalog,
@@ -58,6 +60,8 @@ from orbit.mcp_server.hosted_server import (
     _validate_privileged_role_membership_catalog,
     PRIVILEGED_GROUP_ROLES,
     AUTHORIZATION_ADMIN_ROLE,
+    EVIDENCE_RUNTIME_TABLES,
+    PROJECT_RUNTIME_UNEXPOSED_TABLES,
 )
 from orbit.mcp_server.hosted_scope import (
     HostedAuthorizationUnavailable,
@@ -80,6 +84,57 @@ GOOD_AUTHORIZATION_ADMIN_ROLE_ROW = (False,) * 5 + (True,) * 9
 GOOD_PROJECT_ROLE_ROW = (
     (False,) * 5 + (True,) * 6 + (False,) + (True,) * 26
 )
+_EVIDENCE_OWNER_OID = 10
+_EVIDENCE_OWNER_NAME = "celestin_migration_owner"
+_EVIDENCE_RUNTIME_OID = 30
+_EVIDENCE_LOGIN_OID = 20
+_EVIDENCE_OWNER_PRIVILEGES = (
+    "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"
+)
+_EVIDENCE_RUNTIME_PRIVILEGES = ("SELECT", "INSERT", "UPDATE")
+
+
+def expected_evidence_privilege_rows():
+    rows = []
+    for table_name in EVIDENCE_RUNTIME_TABLES:
+        acl_entries = [
+            {
+                "grantor_oid": _EVIDENCE_OWNER_OID,
+                "grantor_name": _EVIDENCE_OWNER_NAME,
+                "grantee_oid": _EVIDENCE_OWNER_OID,
+                "grantee_name": _EVIDENCE_OWNER_NAME,
+                "privilege_type": privilege,
+                "is_grantable": True,
+            }
+            for privilege in _EVIDENCE_OWNER_PRIVILEGES
+        ]
+        acl_entries.extend(
+            {
+                "grantor_oid": _EVIDENCE_OWNER_OID,
+                "grantor_name": _EVIDENCE_OWNER_NAME,
+                "grantee_oid": _EVIDENCE_RUNTIME_OID,
+                "grantee_name": "celestin_project_runtime",
+                "privilege_type": privilege,
+                "is_grantable": False,
+            }
+            for privilege in _EVIDENCE_RUNTIME_PRIVILEGES
+        )
+        rows.append(
+            (
+                table_name,
+                _EVIDENCE_OWNER_OID,
+                _EVIDENCE_OWNER_NAME,
+                _EVIDENCE_RUNTIME_OID,
+                "celestin_project_runtime",
+                True,
+                _EVIDENCE_LOGIN_OID,
+                "celestin_project_login",
+                True, True, True, False, False, False, False,
+                json.dumps(acl_entries),
+                False,
+            )
+        )
+    return rows
 
 
 def expected_policy_rows():
@@ -200,6 +255,8 @@ class FakePool:
         function_rows=None,
         trigger_rows=None,
         advisory_rows=None,
+        evidence_privilege_rows=None,
+        evidence_privilege_error=None,
         authorization_admin=False,
         authorization_admin_role_row=None,
     ):
@@ -231,6 +288,11 @@ class FakePool:
         self.advisory_rows = (
             expected_advisory_rows(profile) if advisory_rows is None else advisory_rows
         )
+        self.evidence_privilege_rows = (
+            expected_evidence_privilege_rows()
+            if evidence_privilege_rows is None else evidence_privilege_rows
+        )
+        self.evidence_privilege_error = evidence_privilege_error
         self.open_calls = 0
         self.open_timeouts = []
         self.close_calls = 0
@@ -260,6 +322,10 @@ class FakePool:
                 pool.queries.append((query, params))
                 if query.count("%s") != len(params):
                     raise AssertionError("probe placeholder count does not match bound parameters")
+                if "celestin_evidence_runtime_privilege_catalog" in query:
+                    if pool.evidence_privilege_error is not None:
+                        raise pool.evidence_privilege_error
+                    return Cursor(rows=pool.evidence_privilege_rows)
                 if "pg_catalog.pg_trigger AS catalog_trigger" in query:
                     return Cursor(rows=pool.trigger_rows)
                 if "authorization_admin_role_readiness" in query:
@@ -412,18 +478,35 @@ def test_runtime_refuses_unsafe_project_role(index):
         _assert_safe_project_runtime(FakePool(row), timeout=1, scope=PROJECT_SCOPE)
 
 
+@pytest.mark.parametrize("index", [1, 8, 9, 10])
+def test_project_runtime_readiness_rejects_bypass_membership_and_ownership(index):
+    row = list(GOOD_PROJECT_ROLE_ROW)
+    row[index] = not row[index]
+    with pytest.raises(RuntimeError, match="project-isolation"):
+        _assert_safe_project_runtime(FakePool(row), timeout=1, scope=PROJECT_SCOPE)
+
+
 def test_project_runtime_role_probe_checks_scope_and_privilege_invariants():
     pool = FakePool(GOOD_PROJECT_ROLE_ROW)
     _assert_safe_project_runtime(pool, timeout=1, scope=PROJECT_SCOPE)
-    assert len(pool.queries) == 5
-    assert "left(procedure.proname, 12) = 'pg_advisory_'" in pool.queries[1][0]
-    assert "has_function_privilege" in pool.queries[1][0]
+    assert len(pool.queries) == 6
+    assert "celestin_evidence_runtime_privilege_catalog" in pool.queries[1][0]
+    assert "has_table_privilege" in pool.queries[1][0]
+    assert "aclexplode" in pool.queries[1][0]
+    assert "pg_attribute" in pool.queries[1][0]
+    assert "owner_is_separate_from_hosted_runtime_roles" in pool.queries[1][0]
+    assert "pg_catalog.pg_has_role" in pool.queries[1][0]
+    assert pool.queries[1][1] == (
+        "celestin_project_runtime", list(EVIDENCE_RUNTIME_TABLES)
+    )
+    assert "left(procedure.proname, 12) = 'pg_advisory_'" in pool.queries[2][0]
+    assert "has_function_privilege" in pool.queries[2][0]
     assert tuple(PROTECTED_TABLES + AUTHORIZATION_TABLES) + (
         "project_runtime_scopes", "celestin_schema_migrations",
     ) == tuple(pool.queries[0][1][2])
     assert tuple(PROTECTED_TABLES) == tuple(pool.queries[0][1][3])
     assert tuple(AUTHORIZATION_TABLES) == tuple(pool.queries[0][1][15])
-    assert tuple(PROTECTED_TABLES[2:]) + ("celestin_schema_migrations",) == tuple(
+    assert tuple(PROJECT_RUNTIME_UNEXPOSED_TABLES) + ("celestin_schema_migrations",) == tuple(
         pool.queries[0][1][16]
     )
     assert "relrowsecurity" in pool.queries[0][0]
@@ -438,20 +521,199 @@ def test_project_runtime_role_probe_checks_scope_and_privilege_invariants():
     assert "no_unexposed_content_grants" in pool.queries[0][0]
     assert "has_any_column_privilege" in pool.queries[0][0]
     assert "celestin_request_scope_matches" in pool.queries[0][0]
-    assert "pg_policy" in pool.queries[2][0]
-    assert "pg_get_expr" in pool.queries[2][0]
-    assert "pg_proc" in pool.queries[3][0]
-    assert "aclexplode" in pool.queries[3][0]
-    assert "is_grantable" in pool.queries[3][0]
-    assert pool.queries[3][1][0] == "celestin_project_runtime"
-    assert len(pool.queries[3][1]) == 4
-    assert "pg_trigger" in pool.queries[4][0]
-    assert "tgenabled" in pool.queries[4][0]
-    assert "tgtype" in pool.queries[4][0]
-    assert "prosrc" in pool.queries[4][0]
-    assert pool.queries[4][1] == (sorted({
+    assert "pg_policy" in pool.queries[3][0]
+    assert "pg_get_expr" in pool.queries[3][0]
+    assert "pg_proc" in pool.queries[4][0]
+    assert "aclexplode" in pool.queries[4][0]
+    assert "is_grantable" in pool.queries[4][0]
+    assert pool.queries[4][1][0] == "celestin_project_runtime"
+    assert len(pool.queries[4][1]) == 4
+    assert "pg_trigger" in pool.queries[5][0]
+    assert "tgenabled" in pool.queries[5][0]
+    assert "tgtype" in pool.queries[5][0]
+    assert "prosrc" in pool.queries[5][0]
+    assert pool.queries[5][1] == (sorted({
         table for schema, table, _ in _trigger_specs() if schema == "public"
     }),)
+
+
+def test_evidence_runtime_privilege_catalog_accepts_exact_profile():
+    rows = expected_evidence_privilege_rows()
+    _validate_evidence_runtime_privilege_catalog(rows)
+
+    # Ownership privileges are inherent and may be represented by the catalog
+    # default rather than explicit ACL entries.
+    without_explicit_owner_acl = deepcopy(rows)
+    for index, source_row in enumerate(without_explicit_owner_acl):
+        row = list(source_row)
+        entries = json.loads(row[15])
+        row[15] = json.dumps([
+            entry for entry in entries
+            if entry["grantee_oid"] != _EVIDENCE_OWNER_OID
+        ])
+        without_explicit_owner_acl[index] = tuple(row)
+    _validate_evidence_runtime_privilege_catalog(without_explicit_owner_acl)
+
+
+def test_project_runtime_startup_fails_closed_when_evidence_catalog_is_unavailable():
+    pool = FakePool(
+        evidence_privilege_error=RuntimeError("secret-like connection diagnostic")
+    )
+    with pytest.raises(RuntimeError, match="Evidence table privileges could not be verified") as error:
+        _assert_safe_project_runtime(pool, timeout=1, scope=PROJECT_SCOPE)
+    assert "secret-like connection diagnostic" not in str(error.value)
+    assert len(pool.queries) == 2
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_select",
+        "missing_insert",
+        "missing_update",
+        "delete",
+        "truncate",
+        "trigger",
+        "references",
+        "maintain",
+        "public_grant",
+        "direct_login_grant",
+        "authorization_reader_grant",
+        "authorization_admin_grant",
+        "grant_option",
+        "column_grant",
+        "wrong_owner",
+        "owner_in_runtime_group",
+        "different_table_owner",
+        "wrong_grantor",
+        "malformed_acl",
+        "missing_table",
+        "duplicate_table",
+        "unexpected_table",
+    ],
+)
+def test_evidence_runtime_privilege_catalog_rejects_unsafe_profiles(mutation):
+    rows = deepcopy(expected_evidence_privilege_rows())
+    row = list(rows[0])
+    effective_index = {
+        "select": 8,
+        "insert": 9,
+        "update": 10,
+        "delete": 11,
+        "truncate": 12,
+        "trigger": 13,
+        "references": 14,
+    }
+    privilege = {
+        "delete": "DELETE",
+        "truncate": "TRUNCATE",
+        "trigger": "TRIGGER",
+        "references": "REFERENCES",
+        "maintain": "MAINTAIN",
+    }
+    entries = json.loads(row[15])
+
+    if mutation in {"missing_select", "missing_insert", "missing_update"}:
+        name = mutation.removeprefix("missing_")
+        row[effective_index[name]] = False
+        entries = [
+            entry for entry in entries
+            if not (
+                entry["grantee_oid"] == _EVIDENCE_RUNTIME_OID
+                and entry["privilege_type"] == name.upper()
+            )
+        ]
+        row[15] = json.dumps(entries)
+        rows[0] = tuple(row)
+    elif mutation in privilege:
+        if mutation != "maintain":
+            row[effective_index[mutation]] = True
+        entries.append({
+            "grantor_oid": _EVIDENCE_OWNER_OID,
+            "grantor_name": _EVIDENCE_OWNER_NAME,
+            "grantee_oid": _EVIDENCE_RUNTIME_OID,
+            "grantee_name": "celestin_project_runtime",
+            "privilege_type": privilege[mutation],
+            "is_grantable": False,
+        })
+        row[15] = json.dumps(entries)
+        rows[0] = tuple(row)
+    elif mutation == "public_grant":
+        entries.append({
+            "grantor_oid": _EVIDENCE_OWNER_OID,
+            "grantor_name": _EVIDENCE_OWNER_NAME,
+            "grantee_oid": 0,
+            "grantee_name": "PUBLIC",
+            "privilege_type": "SELECT",
+            "is_grantable": False,
+        })
+        row[15] = json.dumps(entries)
+        rows[0] = tuple(row)
+    elif mutation == "direct_login_grant":
+        entries.append({
+            "grantor_oid": _EVIDENCE_OWNER_OID,
+            "grantor_name": _EVIDENCE_OWNER_NAME,
+            "grantee_oid": _EVIDENCE_LOGIN_OID,
+            "grantee_name": "celestin_project_login",
+            "privilege_type": "SELECT",
+            "is_grantable": False,
+        })
+        row[15] = json.dumps(entries)
+        rows[0] = tuple(row)
+    elif mutation in {"authorization_reader_grant", "authorization_admin_grant"}:
+        entries.append({
+            "grantor_oid": _EVIDENCE_OWNER_OID,
+            "grantor_name": _EVIDENCE_OWNER_NAME,
+            "grantee_oid": 40 if mutation == "authorization_reader_grant" else 50,
+            "grantee_name": (
+                "celestin_authorization_reader"
+                if mutation == "authorization_reader_grant"
+                else "celestin_authorization_admin"
+            ),
+            "privilege_type": "SELECT",
+            "is_grantable": False,
+        })
+        row[15] = json.dumps(entries)
+        rows[0] = tuple(row)
+    elif mutation == "grant_option":
+        entries[-1]["is_grantable"] = True
+        row[15] = json.dumps(entries)
+        rows[0] = tuple(row)
+    elif mutation == "column_grant":
+        row[16] = True
+        rows[0] = tuple(row)
+    elif mutation == "wrong_owner":
+        row[1] = _EVIDENCE_LOGIN_OID
+        row[2] = "celestin_project_login"
+        row[5] = False
+        rows[0] = tuple(row)
+    elif mutation == "owner_in_runtime_group":
+        row[5] = False
+        rows[0] = tuple(row)
+    elif mutation == "different_table_owner":
+        second = list(rows[1])
+        second[1] = 11
+        second[2] = "other_schema_owner"
+        rows[1] = tuple(second)
+    elif mutation == "wrong_grantor":
+        entries[-1]["grantor_oid"] = 41
+        entries[-1]["grantor_name"] = "other_schema_owner"
+        row[15] = json.dumps(entries)
+        rows[0] = tuple(row)
+    elif mutation == "malformed_acl":
+        row[15] = "not-json"
+        rows[0] = tuple(row)
+    elif mutation == "missing_table":
+        rows.pop()
+    elif mutation == "duplicate_table":
+        rows.append(rows[0])
+    elif mutation == "unexpected_table":
+        extra = list(rows[0])
+        extra[0] = "unreviewed_evidence_table"
+        rows.append(tuple(extra))
+
+    with pytest.raises(RuntimeError, match="privilege profile is unsafe"):
+        _validate_evidence_runtime_privilege_catalog(rows)
 
 
 def test_authorization_reader_profile_fails_closed_for_unscoped_lock_wrapper():
@@ -1294,7 +1556,7 @@ def _good_preflight_inputs():
         project_id=project_id,
         database_identity="offline-test-db",
         provider_name="provider-unknown",
-        expected_schema_version=9,
+        expected_schema_version=10,
         profile_logins=logins,
         expected_group_members=members,
         max_evidence_age_seconds=300,
@@ -1302,7 +1564,7 @@ def _good_preflight_inputs():
     )
     evidence = HostedCatalogEvidence(
         database_identity="offline-test-db",
-        schema_version=9,
+        schema_version=10,
         observed_at=now - timedelta(seconds=10),
         profiles=(
             HostedProfileCatalogEvidence(
