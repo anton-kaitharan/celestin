@@ -74,6 +74,20 @@ def test_runtime_evidence_service_uses_real_sqlite_for_full_knowledge_workflow(
     assert verified_record.verification_status is VerificationStatus.VERIFIED
     assert verified_evidence.verification_status is VerificationStatus.VERIFIED
 
+    read_scope = _scope(runtime, "project-a", READ)
+    verified_bundle = runtime.evidence_service.get_knowledge(
+        read_scope, original.record.knowledge_id
+    )
+    assert verified_bundle.record.verification_status is VerificationStatus.VERIFIED
+    assert verified_bundle.record.checked_by == "local-reviewer"
+    reloaded_evidence = next(
+        item
+        for item in verified_bundle.evidence
+        if item.evidence_id == attached.evidence_id
+    )
+    assert reloaded_evidence.verification_status is VerificationStatus.VERIFIED
+    assert reloaded_evidence.checked_by == "local-reviewer"
+
     successor = runtime.evidence_service.supersede_knowledge(
         write_scope,
         original.record.knowledge_id,
@@ -82,10 +96,10 @@ def test_runtime_evidence_service_uses_real_sqlite_for_full_knowledge_workflow(
         (_message_source(second.message_id),),
     )
     previous = runtime.evidence_service.get_knowledge(
-        _scope(runtime, "project-a", READ), original.record.knowledge_id
+        read_scope, original.record.knowledge_id
     )
     loaded_successor = runtime.evidence_service.get_knowledge(
-        _scope(runtime, "project-a", READ), successor.record.knowledge_id
+        read_scope, successor.record.knowledge_id
     )
 
     assert previous.record.lifecycle_status is LifecycleStatus.SUPERSEDED

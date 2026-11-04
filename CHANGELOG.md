@@ -4,6 +4,13 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-11-04T18:31:11+05:30 — Assert persisted Evidence verification state
+
+- Changed: Strengthened the real-SQLite local application workflow test to reload the Knowledge bundle through `EvidenceLinkedMemoryService` after verification and assert persisted verification status and verifier for both Knowledge and its attached Evidence.
+- Why: Returned update objects alone did not prove that verification metadata survives persistence and a subsequent service read.
+- Validation: Focused real-SQLite workflow test: 1 passed. Evidence suite: 84 passed. Selected database/Evidence/Capture/MCP regressions: 197 passed. `git diff --check` and `git diff --cached --check` checked after the change.
+- Limitations: Uses a temporary SQLite database. No PostgreSQL behavior was exercised; production code was unchanged.
+
 ## 2026-10-30T15:27:24+05:30 — Compose local Evidence service
 
 - Changed: Added a project-scoped SQLite message lookup and `SQLiteMessageEvidenceResolver`; `build_runtime` now composes `EvidenceLinkedMemoryService` with the existing SQLite Evidence store and resolver over the same local database path. Added temporary-SQLite service workflow and authorization regressions, and extended the local-runtime test to prove a PostgreSQL DSN does not open either Evidence SQLite connection. No public MCP tool was added.
