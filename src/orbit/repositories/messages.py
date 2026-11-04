@@ -63,6 +63,19 @@ class ChatMessageRepository:
             raise NotFoundError(f"chat message {message_id} not found")
         return dict(row)
 
+    def get_for_project(self, project: str, message_id: int) -> dict:
+        """Return one message only when its ID belongs to ``project``."""
+        project = validate_project(project)
+        if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id < 1:
+            raise ValidationError("message_id must be a positive integer")
+        row = self._conn.execute(
+            "SELECT * FROM chat_messages WHERE project = ? AND id = ?",
+            (project, message_id),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"chat message {message_id} not found")
+        return dict(row)
+
     def list_for_conversation(
         self,
         project: str,

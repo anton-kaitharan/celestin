@@ -4,6 +4,13 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-10-30T15:27:24+05:30 — Compose local Evidence service
+
+- Changed: Added a project-scoped SQLite message lookup and `SQLiteMessageEvidenceResolver`; `build_runtime` now composes `EvidenceLinkedMemoryService` with the existing SQLite Evidence store and resolver over the same local database path. Added temporary-SQLite service workflow and authorization regressions, and extended the local-runtime test to prove a PostgreSQL DSN does not open either Evidence SQLite connection. No public MCP tool was added.
+- Why: Make the existing manual Evidence/Knowledge service available to trusted local application consumers without adding producer, Capture conversion, or hosted-storage behavior.
+- Validation: Baseline Evidence/runtime command — 94 passed. Final focused message/resolver/composition/MCP suite — 57 passed. Broader database/Evidence/Capture/MCP selection — 197 passed. In-memory Python compilation for nine changed modules passed. `git diff --check` and `git diff --cached --check` passed.
+- Limitations: The local resolver verifies only same-project `MESSAGE` references; other source types remain unresolved. Source resolution and persistence are separate SQLite operations, so source deletion may race after availability is checked. No MCP handler/tool, Capture conversion, producer identity, PostgreSQL live validation, or hosted security behavior was added.
+
 ## 2026-10-30T14:23:20+05:30 — Add local SQLite Evidence storage
 
 - Changed: Added local schema migration 3, `SQLiteEvidenceLinkedMemoryStore`, and real temporary-file conformance/schema tests for the existing Evidence/Knowledge storage port. Corrected the shared supersession fault fixture to include its required predecessor ID and updated current storage documentation.

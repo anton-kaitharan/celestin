@@ -15,10 +15,12 @@ from .model import (
 )
 from .service import EvidenceLinkedMemoryService
 from .sqlite import SQLiteEvidenceLinkedMemoryStore
+from .sqlite_resolver import SQLiteMessageEvidenceResolver
 
 __all__ = [
     "EvidenceLinkedMemoryService",
     "SQLiteEvidenceLinkedMemoryStore",
+    "SQLiteMessageEvidenceResolver",
     "CaptureKnowledgeProvenance",
     "CaptureSourceProvenance",
     "EvidenceRecord",

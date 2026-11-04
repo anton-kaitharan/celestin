@@ -13,6 +13,9 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.tools.tool_manager import ToolManager
 
+from orbit.evidence.service import EvidenceLinkedMemoryService
+from orbit.evidence.sqlite import SQLiteEvidenceLinkedMemoryStore
+from orbit.evidence.sqlite_resolver import SQLiteMessageEvidenceResolver
 from orbit.database.engine import DatabaseError, ROLE_VALUES
 from orbit.repositories._validation import NotFoundError, ValidationError
 from orbit.retrieval import SearchIndexUnavailable
@@ -174,6 +177,7 @@ class ServerRuntime:
     authorizer: ProjectAccessPolicy
     persistence: _AuthorizedPersistenceServices
     retrieval: _AuthorizedRetrievalServices
+    evidence_service: EvidenceLinkedMemoryService
 
 
 def build_runtime(
@@ -204,10 +208,17 @@ def build_runtime(
         if retrieval_backend is not None
         else RetrievalServices(db_path)
     )
+    evidence_service = EvidenceLinkedMemoryService(
+        SQLiteEvidenceLinkedMemoryStore(db_path),
+        SQLiteMessageEvidenceResolver(db_path),
+        authorizer=authorizer,
+        principal=_stdio_principal(),
+    )
     return ServerRuntime(
         authorizer=authorizer,
         persistence=_AuthorizedPersistenceServices(authorizer, persistence),
         retrieval=_AuthorizedRetrievalServices(authorizer, retrieval),
+        evidence_service=evidence_service,
     )
 
 

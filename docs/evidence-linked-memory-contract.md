@@ -8,10 +8,16 @@ current `EvidenceLinkedMemoryStore` port has a local SQLite implementation in
 request-bound PostgreSQL implementation in `src/orbit/evidence/postgres.py`
 using migrations `0005_evidence_linked_memory.sql` and
 `0006_candidate_revision_store.sql`. The PostgreSQL adapter is exposed through
-`PostgresRequestUnitOfWork`; the SQLite adapter is not wired to the local MCP
-runtime. SQLite store-contract tests use temporary database files. PostgreSQL
-tests remain scripted/offline, and migrations and adapter behavior have not
-been verified against a live server.
+`PostgresRequestUnitOfWork`. The local `build_runtime` composition constructs
+`EvidenceLinkedMemoryService` with `SQLiteEvidenceLinkedMemoryStore` and a
+project-scoped SQLite message resolver, sharing the configured local database
+path. This is an internal runtime service only: no MCP handler or public tool
+exposes Evidence/Knowledge operations. The resolver marks only existing,
+same-project `MESSAGE` references available; other supported model types stay
+unresolved until an authoritative local source lookup exists. Runtime and
+store-contract tests use temporary SQLite files. PostgreSQL tests remain
+scripted/offline, and migrations and adapter behavior have not been verified
+against a live server.
 
 The original `MemoryStore` message/decision port and its persistence behavior
 remain separate. The PostgreSQL Evidence adapter does not implement Capture
@@ -27,6 +33,12 @@ not be allowed to construct a service with a permissive authorizer or choose
 its principal. No Resurrection Layer operation is currently exposed through
 MCP. Hosted integration must supply the trusted principal and authorizer at
 the application boundary and continue checking membership on every request.
+The local SQLite message resolver uses a single query constrained by both
+project and message ID, so a missing and a foreign-project message have the
+same `MISSING` result. Source resolution and the subsequent Evidence write use
+separate short-lived SQLite connections; source deletion can race after the
+availability check, and the persisted status is not a durable source lock or
+proof of truth. Only `MESSAGE` is currently resolvable in local runtime.
 
 ## Domain records
 
