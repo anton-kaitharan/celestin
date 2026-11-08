@@ -178,6 +178,38 @@ class PostgresAccessProvisioner:
         )
         return user_id
 
+    def create_workspace(self, access_token: AccessToken, *, slug: str, name: str) -> UUID:
+        """Create a workspace and its active token owner in one transaction.
+
+        The caller must already have an active provisioned human identity. The
+        database owner constraint is the final guard for all other writers.
+        """
+        actor = self._verified_admin(access_token)
+        slug = _required_identity_value("workspace slug", slug)
+        name = _required_identity_value("workspace name", name)
+        workspace_id = uuid4()
+        with self._transaction() as connection:
+            user = connection.execute(
+                "SELECT id FROM celestin_users WHERE issuer = %s AND subject = %s "
+                "AND status = 'active' FOR UPDATE",
+                (actor.issuer, actor.subject),
+            ).fetchone()
+            if user is None:
+                raise ProvisioningDenied("access denied")
+            created = connection.execute(
+                "INSERT INTO celestin_workspaces (id, slug, name) VALUES (%s, %s, %s) "
+                "ON CONFLICT (slug) DO NOTHING RETURNING id",
+                (workspace_id, slug, name),
+            ).fetchone()
+            if created is None:
+                raise ProvisioningConflict("workspace slug already exists")
+            connection.execute(
+                "INSERT INTO celestin_workspace_memberships "
+                "(workspace_id, user_id, role, status) VALUES (%s, %s, 'owner', 'active')",
+                (workspace_id, user[0]),
+            )
+        return workspace_id
+
     def provision_human_project_access(
         self,
         access_token: AccessToken,

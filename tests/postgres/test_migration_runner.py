@@ -119,7 +119,7 @@ def migration(version: int, sql: str = "CREATE TEST;", name: str | None = None) 
 
 def test_packaged_baseline_is_ordered_and_distinct_from_schema_draft():
     migrations = load_migrations()
-    assert [item.version for item in migrations] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    assert [item.version for item in migrations] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     assert migrations[0].name == "0001_hosted_baseline.sql"
     assert "CREATE TABLE celestin_users" in migrations[0].sql
     assert "BEGIN;" not in migrations[0].sql
@@ -132,6 +132,12 @@ def test_packaged_baseline_is_ordered_and_distinct_from_schema_draft():
     assert "idx_chat_messages_search_vector" in migrations[2].sql
     assert "to_tsvector('simple'::regconfig, content)" in migrations[2].sql
     assert "WHERE archived_at IS NULL" in migrations[2].sql
+    owner_guard = migrations[10]
+    assert owner_guard.name == "0011_active_workspace_owner.sql"
+    assert "CREATE CONSTRAINT TRIGGER celestin_workspace_active_owner_guard" in owner_guard.sql
+    assert "CREATE CONSTRAINT TRIGGER celestin_membership_active_owner_guard" in owner_guard.sql
+    assert "CREATE CONSTRAINT TRIGGER celestin_user_active_owner_guard" in owner_guard.sql
+    assert owner_guard.sql.count("DEFERRABLE INITIALLY DEFERRED") == 3
     assert "idx_project_memory_search_vector" in migrations[2].sql
     assert migrations[3].name == "0004_memory_capabilities.sql"
     assert "can_approve_candidates BOOLEAN NOT NULL DEFAULT FALSE" in migrations[3].sql
