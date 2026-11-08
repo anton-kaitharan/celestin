@@ -58,6 +58,8 @@ from orbit.mcp_server.hosted_server import (
     _validate_function_catalog,
     _validate_policy_catalog,
     _validate_privileged_role_membership_catalog,
+    _login_membership_options_query,
+    _validate_login_membership_options,
     PRIVILEGED_GROUP_ROLES,
     AUTHORIZATION_ADMIN_ROLE,
     EVIDENCE_RUNTIME_TABLES,
@@ -84,6 +86,7 @@ GOOD_AUTHORIZATION_ADMIN_ROLE_ROW = (False,) * 5 + (True,) * 9
 GOOD_PROJECT_ROLE_ROW = (
     (False,) * 5 + (True,) * 6 + (False,) + (True,) * 26
 )
+GOOD_LOGIN_MEMBERSHIP_OPTION_ROW = (True, True, True, True, True, True, False, True)
 _EVIDENCE_OWNER_OID = 10
 _EVIDENCE_OWNER_NAME = "celestin_migration_owner"
 _EVIDENCE_RUNTIME_OID = 30
@@ -135,6 +138,25 @@ def expected_evidence_privilege_rows():
             )
         )
     return rows
+
+
+def expected_active_owner_guard_rows():
+    from orbit.postgres.migrations.runner import load_migrations
+
+    sql = next(item.sql for item in load_migrations() if item.version == 11)
+    source = re.search(
+        r"CREATE FUNCTION public\.celestin_require_active_workspace_owner\(\).*?AS \$\$(.*?)\$\$;",
+        sql, flags=re.IGNORECASE | re.DOTALL,
+    ).group(1)
+    return [
+        (table, name, "O", event, True, True, True, source, True,
+         ("search_path=pg_catalog, public",), "plpgsql", "v", "public", True, False, False, False)
+        for table, name, event in (
+            ("celestin_workspaces", "celestin_workspace_active_owner_guard", 29),
+            ("celestin_workspace_memberships", "celestin_membership_active_owner_guard", 29),
+            ("celestin_users", "celestin_user_active_owner_guard", 17),
+        )
+    ]
 
 
 def expected_policy_rows():
@@ -238,10 +260,12 @@ def expected_privileged_role_membership_rows(expected_members):
         members = sorted(member for role, member in expected_members if role == group)
         if not members:
             rows.append((group, False, False, False, False, False, False, True, True,
-                         None, None, None, None, None, None, None, None, None))
+                         None, None, None, None, None, None, None, None, None,
+                         None, None, None))
         for member in members:
             rows.append((group, False, False, False, False, False, False, True, True,
-                         member, False, True, False, False, False, False, False, True))
+                         member, False, True, False, False, False, False, False, True,
+                         True, True, True))
     return rows
 
 
@@ -259,6 +283,8 @@ class FakePool:
         evidence_privilege_error=None,
         authorization_admin=False,
         authorization_admin_role_row=None,
+        membership_option_row=None,
+        owner_guard_rows=None,
     ):
         self.row = row
         self.authorization_admin = authorization_admin
@@ -293,6 +319,13 @@ class FakePool:
             if evidence_privilege_rows is None else evidence_privilege_rows
         )
         self.evidence_privilege_error = evidence_privilege_error
+        self.membership_option_row = (
+            GOOD_LOGIN_MEMBERSHIP_OPTION_ROW
+            if membership_option_row is None else membership_option_row
+        )
+        self.owner_guard_rows = (
+            expected_active_owner_guard_rows() if owner_guard_rows is None else owner_guard_rows
+        )
         self.open_calls = 0
         self.open_timeouts = []
         self.close_calls = 0
@@ -326,8 +359,12 @@ class FakePool:
                     if pool.evidence_privilege_error is not None:
                         raise pool.evidence_privilege_error
                     return Cursor(rows=pool.evidence_privilege_rows)
+                if "celestin_login_membership_option_profile" in query:
+                    return Cursor(row=pool.membership_option_row)
                 if "pg_catalog.pg_trigger AS catalog_trigger" in query:
                     return Cursor(rows=pool.trigger_rows)
+                if "constraint_row.condeferrable" in query:
+                    return Cursor(rows=pool.owner_guard_rows)
                 if "authorization_admin_role_readiness" in query:
                     return Cursor(row=pool.authorization_admin_role_row)
                 if "left(procedure.proname, 12) = 'pg_advisory_'" in query:
@@ -392,7 +429,7 @@ def fake_pools():
     )
 
 
-def test_hosted_tool_names_and_schemas_match_local_stdio(settings):
+def test_hosted_tool_names_preserve_local_contracts_and_add_evidence(settings):
     hosted = create_hosted_mcp_server(
         settings, pools=fake_pools(), token_verifier=FakeVerifier()
     )
@@ -400,9 +437,13 @@ def test_hosted_tool_names_and_schemas_match_local_stdio(settings):
 
     local_tools = {tool.name: tool for tool in local._tool_manager.list_tools()}
     hosted_tools = {tool.name: tool for tool in hosted._tool_manager.list_tools()}
-    assert set(hosted_tools) == set(local_tools) == {
+    assert set(local_tools) == {
         "ingest_chat_message", "save_decision", "search_chat_history",
         "retrieve_context", "ping",
+    }
+    assert set(hosted_tools) == set(local_tools) | {
+        "create_knowledge", "get_knowledge", "associate_evidence",
+        "verify_knowledge", "verify_evidence", "supersede_knowledge",
     }
     for name in local_tools:
         assert hosted_tools[name].parameters == local_tools[name].parameters
@@ -489,18 +530,26 @@ def test_project_runtime_readiness_rejects_bypass_membership_and_ownership(index
 def test_project_runtime_role_probe_checks_scope_and_privilege_invariants():
     pool = FakePool(GOOD_PROJECT_ROLE_ROW)
     _assert_safe_project_runtime(pool, timeout=1, scope=PROJECT_SCOPE)
-    assert len(pool.queries) == 6
-    assert "celestin_evidence_runtime_privilege_catalog" in pool.queries[1][0]
-    assert "has_table_privilege" in pool.queries[1][0]
-    assert "aclexplode" in pool.queries[1][0]
-    assert "pg_attribute" in pool.queries[1][0]
-    assert "owner_is_separate_from_hosted_runtime_roles" in pool.queries[1][0]
-    assert "pg_catalog.pg_has_role" in pool.queries[1][0]
-    assert pool.queries[1][1] == (
+    assert len(pool.queries) == 8
+    assert "constraint_row.condeferrable" in pool.queries[-1][0]
+    assert pool.queries[-1][1] == ([
+        "celestin_workspace_active_owner_guard",
+        "celestin_membership_active_owner_guard",
+        "celestin_user_active_owner_guard",
+    ],)
+    assert "celestin_login_membership_option_profile" in pool.queries[1][0]
+    assert pool.queries[1][1] == ("celestin_project_runtime",)
+    assert "celestin_evidence_runtime_privilege_catalog" in pool.queries[2][0]
+    assert "has_table_privilege" in pool.queries[2][0]
+    assert "aclexplode" in pool.queries[2][0]
+    assert "pg_attribute" in pool.queries[2][0]
+    assert "owner_is_separate_from_hosted_runtime_roles" in pool.queries[2][0]
+    assert "pg_catalog.pg_has_role" in pool.queries[2][0]
+    assert pool.queries[2][1] == (
         "celestin_project_runtime", list(EVIDENCE_RUNTIME_TABLES)
     )
-    assert "left(procedure.proname, 12) = 'pg_advisory_'" in pool.queries[2][0]
-    assert "has_function_privilege" in pool.queries[2][0]
+    assert "left(procedure.proname, 12) = 'pg_advisory_'" in pool.queries[3][0]
+    assert "has_function_privilege" in pool.queries[3][0]
     assert tuple(PROTECTED_TABLES + AUTHORIZATION_TABLES) + (
         "project_runtime_scopes", "celestin_schema_migrations",
     ) == tuple(pool.queries[0][1][2])
@@ -521,18 +570,18 @@ def test_project_runtime_role_probe_checks_scope_and_privilege_invariants():
     assert "no_unexposed_content_grants" in pool.queries[0][0]
     assert "has_any_column_privilege" in pool.queries[0][0]
     assert "celestin_request_scope_matches" in pool.queries[0][0]
-    assert "pg_policy" in pool.queries[3][0]
-    assert "pg_get_expr" in pool.queries[3][0]
-    assert "pg_proc" in pool.queries[4][0]
-    assert "aclexplode" in pool.queries[4][0]
-    assert "is_grantable" in pool.queries[4][0]
-    assert pool.queries[4][1][0] == "celestin_project_runtime"
-    assert len(pool.queries[4][1]) == 4
-    assert "pg_trigger" in pool.queries[5][0]
-    assert "tgenabled" in pool.queries[5][0]
-    assert "tgtype" in pool.queries[5][0]
-    assert "prosrc" in pool.queries[5][0]
-    assert pool.queries[5][1] == (sorted({
+    assert "pg_policy" in pool.queries[4][0]
+    assert "pg_get_expr" in pool.queries[4][0]
+    assert "pg_proc" in pool.queries[5][0]
+    assert "aclexplode" in pool.queries[5][0]
+    assert "is_grantable" in pool.queries[5][0]
+    assert pool.queries[5][1][0] == "celestin_project_runtime"
+    assert len(pool.queries[5][1]) == 4
+    assert "pg_trigger" in pool.queries[6][0]
+    assert "tgenabled" in pool.queries[6][0]
+    assert "tgtype" in pool.queries[6][0]
+    assert "prosrc" in pool.queries[6][0]
+    assert pool.queries[6][1] == (sorted({
         table for schema, table, _ in _trigger_specs() if schema == "public"
     }),)
 
@@ -562,7 +611,7 @@ def test_project_runtime_startup_fails_closed_when_evidence_catalog_is_unavailab
     with pytest.raises(RuntimeError, match="Evidence table privileges could not be verified") as error:
         _assert_safe_project_runtime(pool, timeout=1, scope=PROJECT_SCOPE)
     assert "secret-like connection diagnostic" not in str(error.value)
-    assert len(pool.queries) == 2
+    assert len(pool.queries) == 3
 
 
 @pytest.mark.parametrize(
@@ -720,12 +769,14 @@ def test_authorization_reader_profile_fails_closed_for_unscoped_lock_wrapper():
     pool = FakePool(GOOD_CONTROL_ROLE_ROW)
     with pytest.raises(RuntimeError, match="lock-key scope is not verified"):
         _assert_safe_authorization_reader(pool, timeout=1)
-    assert len(pool.queries) == 3
+    assert len(pool.queries) == 4
     assert tuple(PROTECTED_TABLES + AUTHORIZATION_TABLES) == tuple(pool.queries[0][1][2])
     assert tuple(AUTHORIZATION_TABLES) == tuple(pool.queries[0][1][3])
     assert tuple(PROTECTED_TABLES) == tuple(pool.queries[0][1][4])
-    assert "left(procedure.proname, 12) = 'pg_advisory_'" in pool.queries[1][0]
-    assert "pg_catalog.pg_proc" in pool.queries[2][0]
+    assert "celestin_login_membership_option_profile" in pool.queries[1][0]
+    assert pool.queries[1][1] == ("celestin_authorization_reader",)
+    assert "left(procedure.proname, 12) = 'pg_advisory_'" in pool.queries[2][0]
+    assert "pg_catalog.pg_proc" in pool.queries[3][0]
 
 
 @pytest.mark.parametrize("index", range(len(GOOD_AUTHORIZATION_ADMIN_ROLE_ROW)))
@@ -743,11 +794,13 @@ def test_authorization_admin_probe_keeps_unscoped_lock_helpers_unready():
     pool = FakePool(authorization_admin=True)
     with pytest.raises(RuntimeError, match="lock-key scope is not verified"):
         _assert_safe_authorization_admin(pool, timeout=1)
-    assert len(pool.queries) == 3
+    assert len(pool.queries) == 4
     assert "authorization_admin_role_readiness" in pool.queries[0][0]
-    assert "has_function_privilege" in pool.queries[1][0]
-    assert pool.queries[2][1][0] == AUTHORIZATION_ADMIN_ROLE
-    assert tuple(pool.queries[2][1][1:]) == tuple(
+    assert "celestin_login_membership_option_profile" in pool.queries[1][0]
+    assert pool.queries[1][1] == (AUTHORIZATION_ADMIN_ROLE,)
+    assert "has_function_privilege" in pool.queries[2][0]
+    assert pool.queries[3][1][0] == AUTHORIZATION_ADMIN_ROLE
+    assert tuple(pool.queries[3][1][1:]) == tuple(
         "public." + signature
         for signature in _function_specs(False, authorization_admin=True)
     )
@@ -1160,6 +1213,72 @@ def test_privileged_role_membership_catalog_accepts_exact_no_login_group_roster(
     )
 
 
+@pytest.mark.parametrize("index", range(len(GOOD_LOGIN_MEMBERSHIP_OPTION_ROW)))
+def test_login_membership_option_validator_fails_closed_on_profile_drift(index):
+    row = list(GOOD_LOGIN_MEMBERSHIP_OPTION_ROW)
+    row[index] = not row[index]
+    with pytest.raises(RuntimeError, match="membership options"):
+        _validate_login_membership_options(row)
+
+
+def test_login_membership_option_validator_rejects_missing_catalog_metadata():
+    row = list(GOOD_LOGIN_MEMBERSHIP_OPTION_ROW)
+    row[-1] = False
+    with pytest.raises(RuntimeError, match="membership options"):
+        _validate_login_membership_options(row)
+
+
+def test_login_membership_option_query_has_pre_16_catalog_fallbacks():
+    query = _login_membership_options_query()
+    assert "server_version_num" in query
+    assert "to_jsonb(membership)->>'inherit_option'" in query
+    assert "to_jsonb(membership)->>'set_option'" in query
+    assert "ELSE login_role.rolinherit" in query
+    assert "ELSE TRUE" in query
+    assert "membership.inherit_option" not in query
+    assert "membership.set_option" not in query
+
+
+@pytest.mark.parametrize("index", [4, 5, 6, 7])
+def test_project_runtime_readiness_rejects_membership_option_drift(index):
+    membership_row = list(GOOD_LOGIN_MEMBERSHIP_OPTION_ROW)
+    membership_row[index] = not membership_row[index]
+    pool = FakePool(membership_option_row=membership_row)
+    with pytest.raises(RuntimeError, match="membership options"):
+        hosted_server._assert_safe_project_runtime(pool, timeout=1, scope=PROJECT_SCOPE)
+
+
+@pytest.mark.parametrize("profile", ["authorization_reader", "authorization_admin"])
+def test_control_login_readiness_checks_membership_options(profile):
+    membership_row = list(GOOD_LOGIN_MEMBERSHIP_OPTION_ROW)
+    membership_row[5] = False
+    if profile == "authorization_reader":
+        pool = FakePool(
+            GOOD_CONTROL_ROLE_ROW,
+            project_runtime=False,
+            membership_option_row=membership_row,
+        )
+        expected_group = "celestin_authorization_reader"
+    else:
+        pool = FakePool(
+            GOOD_AUTHORIZATION_ADMIN_ROLE_ROW,
+            project_runtime=False,
+            authorization_admin=True,
+            membership_option_row=membership_row,
+        )
+        expected_group = AUTHORIZATION_ADMIN_ROLE
+
+    with pytest.raises(RuntimeError, match="membership options"):
+        if profile == "authorization_reader":
+            _assert_safe_authorization_reader(pool, timeout=1)
+        else:
+            _assert_safe_authorization_admin(pool, timeout=1)
+    assert any(
+        "celestin_login_membership_option_profile" in query and params == (expected_group,)
+        for query, params in pool.queries
+    )
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -1186,6 +1305,9 @@ def test_privileged_role_membership_catalog_accepts_exact_no_login_group_roster(
         "member_no_inherit",
         "member_admin_option",
         "member_missing_admin_option",
+        "member_inherit_option",
+        "member_set_option",
+        "member_incomplete_options",
         "member_missing_metadata",
         "duplicate_row",
         "malformed_row",
@@ -1202,12 +1324,14 @@ def test_privileged_role_membership_catalog_rejects_unsafe_or_incomplete_roster(
         rows = [row for row in rows if row[0] != AUTHORIZATION_ADMIN_ROLE]
     elif mutation == "unexpected_group":
         rows.append(("unexpected_group", False, False, False, False, False, False, True, True,
-                     None, None, None, None, None, None, None, None, None))
+                     None, None, None, None, None, None, None, None, None,
+                     None, None, None))
     elif mutation == "missing_member":
         rows = [row for row in rows if row[9] != "admin"]
     elif mutation == "unexpected_member":
         rows.append((AUTHORIZATION_ADMIN_ROLE, False, False, False, False, False, False, True,
-                     True, "unexpected", False, True, False, False, False, False, False, True))
+                     True, "unexpected", False, True, False, False, False, False, False, True,
+                     True, True, True))
     elif mutation in {
         "group_login", "group_superuser", "group_bypassrls", "group_createrole",
         "group_createdb", "group_replication", "group_no_inherit",
@@ -1237,6 +1361,7 @@ def test_privileged_role_membership_catalog_rejects_unsafe_or_incomplete_roster(
         "member_not_login", "member_superuser", "member_bypassrls",
         "member_createrole", "member_createdb", "member_replication",
         "member_no_inherit", "member_admin_option", "member_missing_admin_option",
+        "member_inherit_option", "member_set_option", "member_incomplete_options",
         "member_missing_metadata",
     }:
         target = next(i for i, row in enumerate(rows) if row[0] == AUTHORIZATION_ADMIN_ROLE)
@@ -1252,10 +1377,16 @@ def test_privileged_role_membership_catalog_rejects_unsafe_or_incomplete_roster(
             "member_admin_option": 10,
             "member_missing_admin_option": 10,
             "member_missing_metadata": 12,
+            "member_inherit_option": 18,
+            "member_set_option": 19,
+            "member_incomplete_options": 20,
         }[mutation]
         changed[index] = (
             None
-            if mutation in {"member_missing_metadata", "member_missing_admin_option"}
+            if mutation in {
+                "member_missing_metadata", "member_missing_admin_option",
+                "member_incomplete_options",
+            }
             else not changed[index]
         )
         rows[target] = tuple(changed)
@@ -1556,7 +1687,7 @@ def _good_preflight_inputs():
         project_id=project_id,
         database_identity="offline-test-db",
         provider_name="provider-unknown",
-        expected_schema_version=10,
+        expected_schema_version=11,
         profile_logins=logins,
         expected_group_members=members,
         max_evidence_age_seconds=300,
@@ -1564,7 +1695,7 @@ def _good_preflight_inputs():
     )
     evidence = HostedCatalogEvidence(
         database_identity="offline-test-db",
-        schema_version=10,
+        schema_version=11,
         observed_at=now - timedelta(seconds=10),
         profiles=(
             HostedProfileCatalogEvidence(
@@ -1804,6 +1935,60 @@ def test_api_scope_denial_occurs_before_request_database_boundary():
     finally:
         _access_token.reset(token)
     assert not boundary.called
+
+
+def test_hosted_evidence_create_uses_authorized_request_uow():
+    from orbit.evidence.model import KnowledgeBundle, KnowledgeRecord, KnowledgeType
+
+    class Evidence:
+        def create_knowledge(self, scope, knowledge_type, claim, sources):
+            assert scope == "resolved-project-write"
+            assert knowledge_type.value == "decision"
+            assert claim == "approved direction"
+            assert sources[0].source_id == "source-1"
+            return KnowledgeBundle(KnowledgeRecord(
+                "k-1", "project-a", KnowledgeType.DECISION, "approved direction",
+                "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00",
+            ), ())
+
+    class Request:
+        evidence_service = Evidence()
+
+        def evidence_project(self, action):
+            assert action == "write"
+            return "resolved-project-write"
+
+    class Boundary:
+        def execute_authorized_request(self, token, project, action, operation, **kwargs):
+            assert token is token_value and project == "project-a" and action == "write"
+            return operation(Request())
+
+    services = HostedMCPServices(Boundary(), read_scope="memory:read", write_scope="memory:write")
+    token_value = type("Token", (), {"scopes": ["memory:write"], "claims": {"sub": "user-a"}})()
+    token = _access_token.set(token_value)
+    try:
+        result = services.create_knowledge("project-a", "decision", "approved direction", [
+            {"evidence_type": "document", "source_id": "source-1"}
+        ])
+    finally:
+        _access_token.reset(token)
+    assert result["record"]["knowledge_id"] == "k-1"
+
+
+def test_hosted_evidence_cross_tenant_denial_precedes_storage():
+    from orbit.mcp_server.hosted_scope import HostedAccessDenied
+
+    class Boundary:
+        def execute_authorized_request(self, *args, **kwargs):
+            raise HostedAccessDenied("denied")
+
+    services = HostedMCPServices(Boundary(), read_scope="memory:read", write_scope="memory:write")
+    token = _access_token.set(type("Token", (), {"scopes": ["memory:read"]})())
+    try:
+        with pytest.raises(ToolError, match="ACCESS_DENIED"):
+            services.get_knowledge("project-b", "tenant-a-knowledge-id")
+    finally:
+        _access_token.reset(token)
 
 
 def test_hosted_operation_scope_mapping_cannot_be_reconfigured():
