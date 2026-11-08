@@ -14,10 +14,12 @@ from orbit.mcp_server.hosted_scope import (
     HostedSourceMessageNotFound,
     VerifiedPrincipal,
 )
+from orbit.mcp_server.authorization import AuthorizedProject
 from orbit.mcp_server.hosted_identity import HostedRequestBoundary
 from orbit.evidence.postgres import PostgresEvidenceLinkedMemoryStore
 from orbit.evidence.model import (
     EvidenceRecord,
+    EvidenceSource,
     EvidenceType,
     KnowledgeRecord,
     KnowledgeType,
@@ -491,6 +493,96 @@ def test_authorized_evidence_write_uses_the_request_connection_and_outer_transac
     ]
     assert len(scoped_inserts) == 2
     assert all(params[:2] == (WORKSPACE, PROJECT) for params in scoped_inserts)
+
+
+def test_request_composes_evidence_domain_service_and_resolves_message_in_scope():
+    connection = Connection()
+    factory, connect_calls = build_request(connection)
+
+    def operation(request):
+        bundle = request.evidence_service.create_knowledge(
+            request.evidence_project("write"),
+            KnowledgeType.DISCOVERY,
+            "Evidence is tied to this project.",
+            (EvidenceSource(EvidenceType.MESSAGE, str(MESSAGE_ID)),),
+        )
+        assert bundle.evidence[0].reference_status is ReferenceStatus.AVAILABLE
+        assert request.evidence_service._store is request.evidence_store
+        assert connection.transaction_depth == 1
+
+    execute_request(factory, "demo", "write", operation)
+
+    assert connect_calls == [connection]
+    assert connection.commits == 1 and connection.rollbacks == 0
+    assert connection.close_calls == 1
+    source_queries = [
+        (query, params) for query, params in connection.queries
+        if query.startswith("SELECT id FROM chat_messages")
+    ]
+    assert source_queries == [(
+        "SELECT id FROM chat_messages WHERE workspace_id = %s AND project_id = %s AND id = %s",
+        (WORKSPACE, PROJECT, MESSAGE_ID),
+    )]
+    assert len([
+        query for query, _ in connection.queries
+        if query.startswith("INSERT INTO celestin_knowledge_records")
+    ]) == 1
+
+
+def test_request_evidence_service_rejects_foreign_scope_before_storage():
+    connection = Connection()
+    factory, _ = build_request(connection)
+
+    def operation(request):
+        with pytest.raises(PermissionError, match="project access denied"):
+            request.evidence_service.get_knowledge(
+                AuthorizedProject("another-project", "read", None),
+                "foreign-record",
+            )
+
+    execute_request(factory, "demo", "read", operation)
+    assert not any(
+        "celestin_knowledge_records" in query
+        for query, _ in connection.queries
+    )
+    assert connection.commits == 1 and connection.close_calls == 1
+
+
+def test_request_evidence_scope_denies_write_when_grant_is_read_only():
+    connection = Connection(grant=(True, False, None))
+    factory, _ = build_request(connection)
+
+    def operation(request):
+        with pytest.raises(PermissionError, match="project access denied"):
+            request.evidence_project("write")
+
+    execute_request(factory, "demo", "read", operation)
+    assert not any(
+        "celestin_knowledge_records" in query
+        for query, _ in connection.queries
+    )
+
+
+def test_request_evidence_failure_rolls_back_partial_domain_write():
+    connection = Connection(fail_on="INSERT INTO celestin_evidence_records")
+    factory, _ = build_request(connection)
+
+    def operation(request):
+        request.evidence_service.create_knowledge(
+            request.evidence_project("write"),
+            KnowledgeType.DISCOVERY,
+            "Atomic Evidence create.",
+            (EvidenceSource(EvidenceType.DOCUMENT, "doc-atomic"),),
+        )
+
+    with pytest.raises(HostedAuthorizationUnavailable):
+        execute_request(factory, "demo", "write", operation)
+    assert connection.rollbacks == 1 and connection.commits == 0
+    assert connection.close_calls == 1 and connection.closed
+    assert any(
+        query.startswith("INSERT INTO celestin_knowledge_records")
+        for query, _ in connection.queries
+    )
 
 
 def test_later_operation_failure_rolls_back_prior_write_and_closes_without_commit():
