@@ -124,7 +124,7 @@ def test_rejects_unverified_access_token_in_authenticator(signing_key):
         ({"aud": "https://other.example"}, HUMAN_CLIENT),
         ({"iss": "https://attacker.example/"}, HUMAN_CLIENT),
         ({"exp": int(time.time()) - 60}, HUMAN_CLIENT),
-        ({"nbf": int(time.time()) + 60}, HUMAN_CLIENT),
+        ({"nbf": "future"}, HUMAN_CLIENT),
         ({"azp": "unapproved-client"}, HUMAN_CLIENT),
         ({"scope": None}, HUMAN_CLIENT),
         ({"scope": ""}, HUMAN_CLIENT),
@@ -134,6 +134,9 @@ def test_rejects_unverified_access_token_in_authenticator(signing_key):
 )
 def test_rejects_invalid_or_wrong_profile_claims(signing_key, claims, client_id):
     verifier, _ = build_verifier(signing_key)
+    claims = dict(claims)
+    if claims.get("nbf") == "future":
+        claims["nbf"] = int(time.time()) + 60
     token = make_token(signing_key, client_id=client_id, **claims)
 
     assert asyncio.run(verifier.verify_token(token)) is None

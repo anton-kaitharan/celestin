@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -73,9 +74,10 @@ def test_configuration_rejections(tmp_path):
 
 def test_from_json(tmp_path):
     root = make_repo(tmp_path / "repo")
-    resolver = LocalProjectResolver.from_json(f'{{"alpha": "{root}"}}')
+    resolver = LocalProjectResolver.from_json(json.dumps({"alpha": str(root)}))
     assert resolver.resolve("alpha").project_id == "alpha"
-    for text in ("not json", "[]", f'{{"alpha": "{root}", "alpha": "{root}"}}'):
+    duplicate = '{"alpha": ' + json.dumps(str(root)) + ', "alpha": ' + json.dumps(str(root)) + '}'
+    for text in ("not json", "[]", duplicate):
         with pytest.raises(InvalidProjectConfigurationError):
             LocalProjectResolver.from_json(text)
 
