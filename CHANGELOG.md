@@ -4,6 +4,34 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-11-08T15:45:00+05:30 — Enforce hosted workspace ownership and expose Evidence MCP
+
+- Changed: Added migration 0011 with deferred owner checks for workspace, membership, and user lifecycle updates, using existing workspace authorization locks; added atomic `PostgresAccessProvisioner.create_workspace`; extended hosted readiness to verify the exact deferred trigger/function/owner/ACL profile; exposed six hosted-only Evidence tools over the request UoW; updated live authorization coverage, tests, and docs. Fixed Windows-path JSON escaping and made the Auth0 future-`nbf` test timestamp relative to execution time.
+- Why: Close the active-owner lifecycle gap and expose existing Evidence service operations without changing local MCP contracts.
+- Validation: Combined hosted/provisioning/migration/UoW/Auth selection — 609 passed. Final full offline suite — 1,325 passed, 69 skipped, 2 failed (both Windows symlink privilege errors). `rfc8785` was installed only into a temporary test target because it is already declared required by the project. Live authorization module collected 42 cases. No PostgreSQL connection or migration execution was performed.
+- Limitations: Live PostgreSQL behavior, including concurrent owner operations and RLS, is unverified because no dedicated disposable target is configured. Hosted readiness validates required objects/policies and migration 0011's owner guard but does not query the migration ledger directly. Retention decisions remain unspecified and no purge behavior was added.
+
+## 2026-11-05T22:54:58+05:30 — Compose hosted Evidence in the request unit of work
+
+- Changed: `PostgresRequestUnitOfWork` now composes the existing `EvidenceLinkedMemoryService` over its request-bound PostgreSQL adapter, provides a request-authorized project selector, and resolves message references through the same transaction and scope. Added offline permission, foreign-project, and rollback regression cases; added a guarded live service create/readback case; updated shared-storage and PostgreSQL test guidance.
+- Why: Complete the internal hosted storage composition while preserving the local SQLite runtime and public MCP tool contracts.
+- Validation: Evidence/request-unit-of-work selection — 74 passed before the final scope-permission correction; final follow-up selection — 111 passed. Broader hosted/readiness/migration selection — 652 passed, 36 live cases skipped. Full offline suite with `--continue-on-collection-errors` — 1,280 passed, 64 skipped, 3 failed, 1 collection error. The failures are the existing Windows symlink privilege and Windows-path JSON escaping cases in project-state tests; collection failed because required `rfc8785` is absent in the active Python environment. Five changed Python files compiled in memory; migration versions 1–10 loaded in order; live module collection found 37 cases. No dependencies were installed and no PostgreSQL target was configured, so live database validation was not run.
+- Limitations: The hosted Evidence service is composed internally but no hosted MCP handler exposes its operations. Evidence archive/purge/retention behavior and active-owner invariant remain incomplete; hosted startup and live tenant isolation remain unverified.
+
+## 2026-11-05T08:22:49+05:30 — Validate PostgreSQL role membership options
+
+- Changed: Hosted readiness and offline privileged preflight now validate the direct membership `INHERIT`, `SET`, and `ADMIN` options for the exact approved login-to-group roster. PostgreSQL 16+ option fields are inspected through JSON catalog rows; pre-16 behavior is normalized from role-level inheritance and legacy SET semantics. Documented the profile and its limits.
+- Why: Role-level `rolinherit` and `pg_has_role(..., 'MEMBER')` do not establish the PostgreSQL 16 per-membership inheritance and SET options.
+- Validation: `python -m pytest -p no:cacheprovider -o addopts='' tests\test_hosted_server.py` — 527 passed; adjacent hosted scope/auth and scripted PostgreSQL authorization/provisioning suites — 78 passed; in-memory Python compilation and working/cached diff checks passed. No live PostgreSQL suite, SQL, or migration was run.
+- Limitations: Synthetic catalog tests validate Python checks only; membership provisioning and actual PostgreSQL behavior remain for separately approved live validation. The repository does not declare a formal minimum PostgreSQL server version.
+
+## 2026-11-04T21:11:02+05:30 — Align live Evidence privilege acceptance
+
+- Changed: Updated the guarded project-runtime authorization test for migration 0010's Evidence grants, added exact Evidence ACL and cross-project/workspace Evidence row checks, and retained denials for DELETE, TRUNCATE, TRIGGER, and REFERENCES across protected tables. Clarified the migration 0008/0010 distinction and hosted Evidence integration boundary in the PostgreSQL test guide.
+- Why: Keep the live acceptance test aligned with the reviewed least-privilege profile and make clear that checked-in migration source is not evidence of database application or hosted service availability.
+- Validation: Offline hosted readiness, migration-runner, and live-test-safety suites: 596 passed; the guarded live authorization module collected 36 cases. In-memory compilation of the modified live authorization test and `git diff --check` / `git diff --cached --check` passed. The live cases were not executed.
+- Limitations: Migration 0010 and the updated live assertions remain unverified against PostgreSQL; hosted Evidence request authorization and service composition remain unavailable.
+
 ## 2026-11-04T20:14:07+05:30 — Define the hosted Evidence runtime grant profile
 
 - Changed: Added forward-only migration `0010_project_runtime_evidence_grants.sql`, which preflights table ownership, hosted group-role safety, unexpected table/column ACLs, revokes existing PUBLIC/hosted-group table grants, and grants only SELECT/INSERT/UPDATE on the Knowledge and Evidence tables to `celestin_project_runtime`. Hosted request readiness now validates effective permissions and the exact table ACL profile, including owner separation, grantor/grantee, grant-option, and column-ACL checks. Updated PostgreSQL readiness documentation and the offline schema-version fixture.
