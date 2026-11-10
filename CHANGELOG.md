@@ -4,6 +4,13 @@ Record each meaningful project change during the event, newest first. Update thi
 
 ## Event build log
 
+## 2026-11-08T16:34:00+05:30 — Audit shared-storage completion status
+
+- Changed: Added `docs/CELestin_FINAL_COMPLETION_PLAN.md` with the current architecture map, evidence-qualified completion matrix, recorded verification results, prioritized blockers, Neon compatibility review, and sequenced completion roadmap.
+- Why: Make the remaining path to a secure hosted shared-storage release executable and distinguish offline evidence from unverified PostgreSQL/provider behavior.
+- Validation: Inspected current source/migrations/tests/docs and official Neon role/pooling documentation. No tests, database connections, migrations, or database changes were performed.
+- Limitations: Live PostgreSQL and Neon remain unverified; implementation, safe disposable PostgreSQL setup, and product/provider decisions remain outstanding.
+
 ## 2026-11-08T15:45:00+05:30 — Enforce hosted workspace ownership and expose Evidence MCP
 
 - Changed: Added migration 0011 with deferred owner checks for workspace, membership, and user lifecycle updates, using existing workspace authorization locks; added atomic `PostgresAccessProvisioner.create_workspace`; extended hosted readiness to verify the exact deferred trigger/function/owner/ACL profile; exposed six hosted-only Evidence tools over the request UoW; updated live authorization coverage, tests, and docs. Fixed Windows-path JSON escaping and made the Auth0 future-`nbf` test timestamp relative to execution time.
