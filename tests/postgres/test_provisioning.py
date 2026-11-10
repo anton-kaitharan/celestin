@@ -360,6 +360,33 @@ def test_workspace_membership_revocation_rejects_owner_and_revokes_grants():
     assert any("UPDATE celestin_project_memberships" in sql for sql, _ in connection.calls)
 
 
+def test_workspace_and_initial_owner_are_created_in_one_transaction():
+    class WorkspaceConnection(Connection):
+        def execute(self, query, params=()):
+            sql = " ".join(query.split())
+            self.calls.append((sql, tuple(params)))
+            if sql.startswith("SELECT id FROM celestin_users WHERE issuer"):
+                return Cursor((ACTOR_ID,))
+            if sql.startswith("INSERT INTO celestin_workspaces"):
+                return Cursor((params[0],))
+            if sql.startswith("INSERT INTO celestin_workspace_memberships"):
+                return Cursor(None)
+            return Cursor(None)
+
+    connection = WorkspaceConnection()
+    provisioner = PostgresAccessProvisioner(lambda: connection)
+    workspace_id = provisioner.create_workspace(
+        verified_admin_token(), slug="new-workspace", name="New workspace"
+    )
+    assert isinstance(workspace_id, UUID)
+    assert connection.commits == 1 and connection.rollbacks == 0
+    created = [sql for sql, _ in connection.calls if sql.startswith((
+        "INSERT INTO celestin_workspaces", "INSERT INTO celestin_workspace_memberships"
+    ))]
+    assert len(created) == 2
+    assert connection.calls[-1][1] == (workspace_id, ACTOR_ID)
+
+
 def test_caller_constructed_access_token_cannot_impersonate_admin():
     connection_calls = []
     provisioner = PostgresAccessProvisioner(lambda: connection_calls.append(True))

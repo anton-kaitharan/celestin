@@ -16,11 +16,14 @@ from orbit.mcp_server import server
 from orbit.mcp_server.authorization import ProjectAccessPolicy
 from orbit.mcp_server.persistence_services import PersistenceServices
 from orbit.mcp_server.retrieval_services import RetrievalServices
-from orbit.storage.sqlite import SQLiteMemoryStore
 from orbit.database.engine import connect
-from orbit.retrieval import SearchIndexUnavailable
-from orbit.repositories.decisions import DecisionRepository
+from orbit.evidence.service import EvidenceLinkedMemoryService
+from orbit.evidence.sqlite import SQLiteEvidenceLinkedMemoryStore
+from orbit.evidence.sqlite_resolver import SQLiteMessageEvidenceResolver
 from orbit.repositories._validation import ValidationError
+from orbit.repositories.decisions import DecisionRepository
+from orbit.retrieval import SearchIndexUnavailable
+from orbit.storage.sqlite import SQLiteMemoryStore
 from orbit.mcp_server.server import (
     MAX_TOKEN_BUDGET,
     MCPToolHandlers,
@@ -331,15 +334,30 @@ class ToolContractTests(unittest.TestCase):
         with patch.dict("os.environ", {"CELESTIN_POSTGRES_DSN": "postgresql://unused"}):
             with patch("orbit.storage.sqlite.connect") as persistence_connect:
                 with patch("orbit.mcp_server.retrieval_services.connect") as retrieval_connect:
-                    runtime = build_runtime()
-                    app = create_mcp_server(runtime)
+                    with (
+                        patch("orbit.evidence.sqlite.connect") as evidence_connect,
+                        patch(
+                            "orbit.evidence.sqlite_resolver.connect"
+                        ) as resolver_connect,
+                    ):
+                        runtime = build_runtime()
+                        app = create_mcp_server(runtime)
 
         self.assertIsInstance(runtime.persistence.backend, PersistenceServices)
         self.assertIsInstance(runtime.persistence.backend._store, SQLiteMemoryStore)
         self.assertIsInstance(runtime.retrieval.backend, RetrievalServices)
+        self.assertIsInstance(runtime.evidence_service, EvidenceLinkedMemoryService)
+        self.assertIsInstance(
+            runtime.evidence_service._store, SQLiteEvidenceLinkedMemoryStore
+        )
+        self.assertIsInstance(
+            runtime.evidence_service._resolver, SQLiteMessageEvidenceResolver
+        )
         self.assertEqual(app.name, "Celestin")
         persistence_connect.assert_not_called()
         retrieval_connect.assert_not_called()
+        evidence_connect.assert_not_called()
+        resolver_connect.assert_not_called()
 
 
 if __name__ == "__main__":

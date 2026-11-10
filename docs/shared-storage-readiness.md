@@ -1,0 +1,101 @@
+# Celestin Shared Storage Readiness
+
+**Status: PARTIAL; hosted production readiness is BLOCKED.** This report describes source and offline-test evidence on `origin/main` commit `84b0fb89707ea59445658761ceb036c419e3c870`, inspected 2026-10-30. A schema file, adapter fake, or offline test is not evidence that PostgreSQL accepted a migration or enforced isolation on a server.
+
+Resurrection Producer-to-Knowledge is explicitly outside this workstream. This document does not define producer, delivery, candidate-revision, conversion, or receipt behavior.
+
+## Architecture observed
+
+```mermaid
+flowchart LR
+  subgraph Local[Local mode — implemented]
+    LC[stdio MCP client] --> LS[server.py / MCPToolHandlers]
+    LS --> PS[PersistenceServices]
+    PS --> SM[SQLiteMemoryStore]
+    SM --> SE[SQLite engine and migrations]
+    LS --> RS[RetrievalServices]
+    RS --> SQ[RetrievalService / SQLiteRetrievalData]
+    SQ --> SE
+  end
+  subgraph Hosted[Hosted mode — composed, gated]
+    HC[Streamable HTTP client] --> HS[hosted_server.py]
+    HS --> AV[Auth0 access-token verifier and API-scope check]
+    AV --> CR[Read-only authorization route transaction]
+    CR --> PR[Exact configured project pool]
+    PR --> AU[Final authorization and mapped session_user check]
+    AU --> UOW[PostgresRequestUnitOfWork]
+    UOW --> PM[PostgresMemoryStore]
+    UOW --> PE[PostgresEvidenceLinkedMemoryStore]
+    UOW --> RT[PostgresRetrievalData]
+    PM --> PG[(PostgreSQL)]
+    PE --> PG
+    RT --> PG
+  end
+```
+
+The hosted composition in `src/orbit/mcp_server/hosted_server.py`, `src/orbit/postgres/authorization.py`, and `src/orbit/postgres/unit_of_work.py` is source-level evidence only. `CELESTIN_HOSTED_PROJECT_ROLE_ISOLATION_ENABLED` defaults to false; startup readiness rejects unapproved role/lock profiles. Local `src/orbit/mcp_server/server.py` continues to build the SQLite runtime.
+
+## Capability register
+
+`PASS` means the stated local behavior has direct test evidence. It does not mean production readiness. `PARTIAL` means implementation exists but important behavior is unverified or not wired. `BLOCKED` means a security decision, approved environment, or live evidence is required. `NOT IMPLEMENTED` means no corresponding implementation was found.
+
+| Capability | Status | Evidence and limits |
+|---|---|---|
+| Local chat and decision persistence | **PASS** | `MemoryStore` (`src/orbit/storage/protocol.py`) has message insertion, decision upsert, and status update. `SQLiteMemoryStore` delegates to existing repositories. `tests/test_mcp_persistence.py`, `tests/database/`, and MCP tool tests use temporary SQLite databases. Project labels scope rows; the local configured authorization boundary is separate from database identity. |
+| Local SQLite migration/recovery | **PASS** | `src/orbit/database/engine.py` applies each numbered migration under `BEGIN IMMEDIATE`, rechecks `PRAGMA user_version`, and rolls back on errors. `tests/database/test_engine.py` exercises failure rollback and concurrent initialization. The local schema was version 2 at audit start; additive migration 3 now adds Evidence tables while preserving message, decision, FTS5, and index objects. |
+| Local Evidence/Knowledge persistence | **PASS — internal local composition; no MCP exposure** | `build_runtime` composes `EvidenceLinkedMemoryService`, `SQLiteEvidenceLinkedMemoryStore`, and `SQLiteMessageEvidenceResolver` using the same SQLite path. The resolver verifies `MESSAGE` IDs with a query constrained by project and message ID; other model source types remain unresolved. `tests/evidence/test_local_application.py`, `test_sqlite_resolver.py`, and `test_sqlite_store.py` cover real temporary SQLite behavior and composition. No MCP handler/tool exposes these operations, and there is no producer conversion or durable Capture occurrence link. |
+| PostgreSQL messages and decisions | **PARTIAL** | `PostgresMemoryStore` implements the current `MemoryStore` operations and has a request-bound constructor. `tests/storage/test_postgres_memory_store.py` uses a scripted connection, not PostgreSQL. Hosted UoW composition binds it to the authorized transaction. Driver, DDL, constraints, and commit behavior are not live-verified. |
+| PostgreSQL Evidence/Knowledge | **PARTIAL — hosted APIs implemented, live unverified** | Migration 0005 and `PostgresEvidenceLinkedMemoryStore` represent create/read, evidence attachment, verification, and supersession. `PostgresRequestUnitOfWork` composes the existing service and message resolver on the authorized transaction. Six additive hosted-only MCP tools expose those operations while preserving local stdio contracts. Offline tests cover request composition, API tool registration, authorization and cross-tenant denial. Live PostgreSQL behavior remains unverified; no archive/purge/retention API exists. |
+| Retrieval and indexes | **PARTIAL** | `RetrievalData` has SQLite and PostgreSQL implementations. SQLite FTS5 and local optional semantic/document indexes are used through `RetrievalServices`. Hosted request UoW binds PostgreSQL lexical retrieval. `tests/retrieval/` and fake PostgreSQL adapter tests pass offline. PostgreSQL query/index plans and runtime performance have not been verified live; hosted semantic/PageIndex are not enabled. |
+| Workspace/project authorization model | **PARTIAL** | Migrations 0001/0002/0004 define users, workspaces, projects, memberships, service grants, lifecycle and capability columns. `PostgresHostedAuthorizationSession` resolves issuer/subject identities and scoped grants; `PostgresAccessProvisioner` and `ProjectDatabaseLoginRegistry` provide code-level admin helpers. Offline tests use scripted sessions. An audited operator lifecycle, administrator UI/API, backups, and production provisioning are absent. |
+| Active workspace owner invariant | **IMPLEMENTED / LIVE UNVERIFIED** | Migration 0011 installs deferred constraint triggers on workspace, membership, and user status changes; the existing per-workspace authorization lock serializes concurrent lifecycle writes. Provisioning creates the workspace and initial active owner in one transaction. Startup readiness checks all three deferred triggers, their function body, owner, and ACL. Guarded live tests cover ownerless commit, demotion, suspension, user deactivation, and concurrent last-owner transitions; they have not run without a disposable DB target. No ownership transfer API exists. |
+| PostgreSQL tenant isolation | **IMPLEMENTED IN SOURCE / LIVE BLOCKED** | Migrations 0007–0009 force RLS over the twelve protected content tables and bind project scope to `session_user`; request pools use rollback plus `DISCARD ALL`; readiness verifies policy and scope catalogs. Guarded tests cover cross-project reads and writes, grants, scope revocation and pool reuse, but no disposable target is established, so actual PostgreSQL behavior is unverified and hosted startup remains fail-closed. |
+| PostgreSQL migration execution | **PARTIAL** | The explicit `celestin-migrate` runner checks ordered versions and checksums, refuses adoption of unknown objects, serializes migration application, and commits each migration with its ledger row. `tests/postgres/test_migration_runner.py` uses a fake connection. PostgreSQL SQL validity, server lock behavior, role ownership and upgrade recovery remain unverified. Existing migrations are treated as immutable. |
+| Project/workspace CRUD and retention | **PARTIAL / BLOCKED** | PostgreSQL schema has project/workspace lifecycle and `purge_after` metadata; authorization provisioning has scoped operations. No general cross-backend repository covers lifecycle CRUD, archive, retention eligibility, or purge. Adding delete/purge behavior requires an approved retention and ownership policy; restrictive foreign keys are not a retention service. |
+| Cross-backend storage contract | **PARTIAL** | Three separate ports exist: `MemoryStore`, `EvidenceLinkedMemoryStore`, and `RetrievalData`. The Evidence port contract now runs against real temporary SQLite files; PostgreSQL adapters have scripted/fake tests only, not one live-equivalent conformance run. The ports still do not define generic workspace/membership/source/archive operations. |
+| Pools, operations and recovery | **PARTIAL** | Hosted source bounds pools/timeouts, resets sessions, sanitizes failures, and exposes health checks. Offline tests inspect these code paths. Pool exhaustion, cancellation, failover, monitoring, restore, backup, and production incident behavior have not been exercised. |
+
+## Schema and migration review
+
+The packaged PostgreSQL migrations are numbered 0001–0011 and are applied only by the explicit runner. Migration 0001 defines authorization entities plus `chat_messages` and `project_memory`; 0002 adds user status; 0003 adds partial search indexes; 0004 adds default-deny capabilities; 0005 adds manual knowledge/evidence; 0006 adds producer/candidate/revision/review/occurrence/conversion schema groundwork; 0007 adds GUC-based RLS; 0008 replaces those policies with protected `session_user`-mapped project roles; 0009 narrows project request-lock scope; 0010 adds the project-runtime Evidence/Knowledge table grant profile; and 0011 enforces a deferred active-workspace-owner invariant. These are source facts, not approval to use candidate/delivery semantics or evidence that any schema exists in a database.
+
+Observed integrity measures include `(workspace_id, project_id)` references to workspace-owned projects, composite same-project references for source messages and knowledge supersession, checks for enum/status values, and project/workspace indexes. Evidence rows are ordered per knowledge record. Candidate migration 0006 constrains producer-qualified candidate and revision keys and ordered occurrence rows, but there is no producer adapter in this storage task. SQLite migration 3 adds equivalent local project-scoped knowledge/evidence references, per-knowledge evidence positions, status/type checks, and one-successor uniqueness. The separate `docs/hosted-tenancy-schema.sql` is a draft and is not executed by the packaged runner.
+
+The PostgreSQL migration runner has no automatic downgrade. After any shared schema change is applied, recovery must use a separately reviewed forward fix or approved restore. No PostgreSQL migration was run during this task; local SQLite migration 3 was exercised only against temporary test databases.
+
+## Security and operational boundary
+
+- Local SQLite remains the source of truth for stdio. Configuring a PostgreSQL DSN does not select or enable hosted transport.
+- Hosted mode is a separate HTTPS composition. Token verification, API scope, explicit workspace selection, route authorization, exact project-pool selection, final authorization, and request UoW are present in source.
+- The request UoW binds memory, Evidence, retrieval, and the existing Evidence domain service to one connection. Six hosted-only Evidence MCP operations are registered; local stdio contracts remain unchanged. The outer hosted request owns commit/rollback.
+- Project logins are mapped to a protected workspace/project scope using `session_user`; migrations 0008/0009 and hosted readiness checks encode these expectations.
+- Hosted startup still fails closed. The advisory-lock function ACL/wrapper design and provider/ownership capabilities remain unresolved. Do not enable hosted serving or loosen readiness to make offline tests pass.
+- Test fixture names and `CELESTIN_TEST_POSTGRES_DISPOSABLE=true` are not proof of operator approval. The live fixture expects a fresh loopback target and distinct least-privileged roles, applies migrations once, and never drops/truncates. No `CELESTIN_TEST_POSTGRES_*` target was configured for the 2026-11-05 completion pass, so no live database operation was attempted.
+- Auth0 tenant behavior, database roles, grants, RLS, migration execution, Neon capabilities, restore, and external monitoring were not exercised.
+
+## Performance, retention, backup and recovery
+
+SQLite FTS5 and PostgreSQL text-search expression indexes are defined, but no comparative query plan or load benchmark was run. Semantic vectors and PageIndex are local optional features; their hosted persistence, rebuild, and tenant lifecycle are not implemented. There is no verified pool-load, connection-loss, or failover test.
+
+Archive timestamps/statuses and purge-eligibility timestamps exist in portions of the schema. A consistent archival API, retention schedule, purge worker, backup policy, restore objective, and restore drill are not present in the verified implementation. These require storage/product/operations decisions before destructive lifecycle behavior is added.
+
+## Verification at audit start
+
+- Branch `codex/celestin-shared-storage-platform` was created from locally verified `origin/main` at `84b0fb89707ea59445658761ceb036c419e3c870`; the root worktree was clean. The older feature branch's two documentation-only commits remain on that branch.
+- Offline baseline command: `python -B -m pytest -p no:cacheprovider -o addopts='' tests/storage tests/database tests/evidence/test_service.py tests/evidence/test_postgres_store.py tests/retrieval tests/project_state tests/postgres/test_migration_runner.py tests/postgres/test_migrate_cli.py tests/postgres/test_live_support.py tests/postgres/test_request_unit_of_work.py tests/postgres/test_hosted_authorization.py tests/postgres/test_hosted_identity_boundary.py tests/postgres/test_provisioning.py tests/test_hosted_auth.py tests/test_hosted_server.py tests/test_hosted_scope.py tests/test_mcp_authorization.py tests/test_mcp_persistence.py tests/test_mcp_tools.py tests/test_mcp_protocol.py` — **1,044 passed, 4 failed, 6 skipped**. Failures: Windows symlink privilege in two project-state tests; Windows-path JSON escaping in one resolver test; and an Auth0 `nbf` boundary test accepted a token at the exact leeway boundary.
+- Storage-focused subset (same command without `tests/project_state` and `tests/test_hosted_auth.py`): **974 passed, 6 skipped**.
+- `rfc8785` and `psycopg` are unavailable in the active Python 3.13.9 environment. No dependencies were installed. Live PostgreSQL tests, databases, SQL operations, migrations, external services, and deployments were not run.
+
+## Remaining blockers and next work
+
+The local manual Evidence service is composed into `ServerRuntime` for internal application consumers and is intentionally not exposed through local stdio MCP. Hosted Evidence service operations are exposed through six authenticated hosted-only tools on the existing authorized request UoW. Their PostgreSQL behavior and RLS remain unverified because no dedicated disposable target was configured. Producer conversion and occurrence persistence remain out of scope. Evidence archive/purge/retention semantics require a separately defined policy; no behavior was invented here.
+
+The following remain blocked or intentionally absent: live PostgreSQL migration syntax/constraint and transaction evidence; hosted RLS/isolation approval and live test; direct migration-ledger version lookup in hosted readiness; Neon advisory-lock/ownership capability evidence; production provisioning and admin lifecycle; shared retention, archive, purge, backup and restore policy; hosted retrieval performance; and complete cross-backend CRUD interfaces for projects, workspaces, memberships, sources, indexing and retention. Product/operations approval is needed for retention duration, archive restoration, purge authorization, and dependency handling. Do not add guessed delete, purge, approval, or retry semantics.
+
+## Progress updates
+
+Updates below record bounded implementations and the checks actually run. They do not replace the source audit above or turn fake/live-skipped results into production evidence.
+
+- **2026-10-30 — Local Evidence storage:** Added additive SQLite schema migration 3 and `SQLiteEvidenceLinkedMemoryStore` for the current manual Evidence/Knowledge port. The reusable protocol contract now runs against real temporary SQLite files; tests cover rollback after staged create/supersede work, project-scoped access and references, idempotent and concurrent attachment, verification updates, ordered associations, schema constraints, one-successor concurrency, and upgrade preservation from schema version 2. The focused storage/runtime selection passed **988 tests with 6 optional-dependency skips**. A broader selected run reported **1,059 passed, 3 failed, 6 skipped**; the failures were the pre-existing Windows symlink privilege and invalid Windows-path JSON cases in project-state tests. The Auth0 `nbf` case that failed in the initial run passed on the final run. No MCP handler or producer conversion was added. This is local SQLite evidence only and does not validate PostgreSQL.
+
+- **2026-10-30 — Local Evidence application composition:** `build_runtime` now composes the Evidence service, SQLite store, and project-scoped message resolver over the shared local database path. Added service-plus-temporary-SQLite coverage for create/read/attach/verification/supersession and authorization denial before resolver/store access. The resolver supports existing local `MESSAGE` references only; unsupported source types remain unresolved, and malformed/oversized IDs fail closed as missing. The focused local message/resolver/composition/MCP selection passed **57 tests**; the broader database/Evidence/Capture/MCP selection passed **197 tests**. No live PostgreSQL, MCP Evidence tool, producer conversion, or hosted security change is included.

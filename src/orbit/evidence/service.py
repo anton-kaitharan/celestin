@@ -1,9 +1,11 @@
 """Authorized domain service for evidence-linked knowledge.
 
-Persistence is supplied through a storage-neutral port. The request-bound
-PostgreSQL adapter implements that port through the hosted request unit of work;
-there is no SQLite Evidence adapter or MCP runtime wiring. See
-docs/evidence-linked-memory-contract.md for the domain prototype and limitations.
+Persistence is supplied through a storage-neutral port implemented by local
+SQLite and request-bound PostgreSQL adapters. The local runtime composes the
+SQLite service for internal application consumers, but no MCP tool exposes it;
+the PostgreSQL adapter is supplied by the hosted request unit of work. See
+``docs/evidence-linked-memory-contract.md`` for the domain contract and
+producer/conversion limitations.
 """
 
 from __future__ import annotations

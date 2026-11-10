@@ -52,6 +52,22 @@ def test_get_missing_raises(messages):
         messages.get(999_999)
 
 
+def test_get_for_project_filters_by_id_and_project(messages, sample_message_id):
+    other_project_id = messages.insert("proj-b", "conv-1", "user", "private")
+
+    assert messages.get_for_project("proj-a", sample_message_id)["id"] == sample_message_id
+    with pytest.raises(NotFoundError):
+        messages.get_for_project("proj-a", other_project_id)
+    with pytest.raises(NotFoundError):
+        messages.get_for_project("proj-a", 999_999)
+
+
+@pytest.mark.parametrize("message_id", [0, -1, True, "1", None])
+def test_get_for_project_rejects_invalid_ids(messages, message_id):
+    with pytest.raises(ValidationError):
+        messages.get_for_project("proj-a", message_id)
+
+
 def test_list_conversation_chronological_order(messages):
     ids = [
         messages.insert("proj-a", "conv-1", role, content)

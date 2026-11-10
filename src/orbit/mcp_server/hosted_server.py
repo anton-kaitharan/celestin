@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import json
 import logging
 import os
@@ -47,6 +47,13 @@ from orbit.postgres.authorization import (
     ProjectScopedPostgresHostedAuthorizationSessionFactory,
 )
 from orbit.postgres.unit_of_work import PostgresRequestUnitOfWork
+from orbit.evidence import EvidenceSource, EvidenceType, KnowledgeType, VerificationStatus
+from orbit.evidence.service import (
+    EvidenceNotAssociated,
+    EvidenceReferenceMissing,
+    EvidenceValidationError,
+    KnowledgeNotFound,
+)
 from orbit.retrieval.service import _search_result_dict
 
 from .server import (
@@ -75,6 +82,15 @@ PROTECTED_TABLES = (
     "celestin_candidate_evidence_records",
     "celestin_candidate_occurrences",
     "celestin_candidate_conversions",
+)
+EVIDENCE_RUNTIME_TABLES = (
+    "celestin_knowledge_records",
+    "celestin_evidence_records",
+)
+PROJECT_RUNTIME_UNEXPOSED_TABLES = tuple(
+    table
+    for table in PROTECTED_TABLES
+    if table not in ("chat_messages", "project_memory", *EVIDENCE_RUNTIME_TABLES)
 )
 AUTHORIZATION_TABLES = (
     "celestin_users",
@@ -720,6 +736,14 @@ class HostedMCPServices:
         except HostedAuthorizationUnavailable:
             logger.error("hosted authorization or database request failed")
             raise _error("STORAGE_ERROR", "The request could not be completed.") from None
+        except EvidenceReferenceMissing:
+            raise _error("SOURCE_MESSAGE_NOT_FOUND", "The source was not found in this project.") from None
+        except KnowledgeNotFound:
+            raise _error("KNOWLEDGE_NOT_FOUND", "The requested knowledge was not found.") from None
+        except EvidenceNotAssociated:
+            raise _error("EVIDENCE_NOT_FOUND", "The requested evidence was not found.") from None
+        except (EvidenceValidationError, ValueError, TypeError):
+            raise _error("INVALID_ARGUMENT", "Evidence arguments are invalid.") from None
         except Exception as exc:
             logger.error("hosted operation failed (%s)", type(exc).__name__)
             code = "RETRIEVAL_UNAVAILABLE" if action == "read" else "STORAGE_ERROR"
@@ -825,6 +849,54 @@ class HostedMCPServices:
 
         return self._execute(project, "read", operation)
 
+    def create_knowledge(self, project: str, knowledge_type: str, claim: str, evidence_sources: list[dict[str, Any]]):
+        sources = _evidence_sources(evidence_sources)
+        def operation(request: PostgresRequestUnitOfWork):
+            bundle = request.evidence_service.create_knowledge(
+                request.evidence_project("write"), KnowledgeType(knowledge_type), claim, sources
+            )
+            return _knowledge_bundle_dict(bundle)
+        return self._execute(project, "write", operation)
+
+    def get_knowledge(self, project: str, knowledge_id: str):
+        def operation(request: PostgresRequestUnitOfWork):
+            return _knowledge_bundle_dict(request.evidence_service.get_knowledge(
+                request.evidence_project("read"), knowledge_id
+            ))
+        return self._execute(project, "read", operation)
+
+    def associate_evidence(self, project: str, knowledge_id: str, evidence_source: dict[str, Any]):
+        source = _evidence_sources([evidence_source])[0]
+        def operation(request: PostgresRequestUnitOfWork):
+            return _evidence_record_dict(request.evidence_service.associate_evidence(
+                request.evidence_project("write"), knowledge_id, source
+            ))
+        return self._execute(project, "write", operation)
+
+    def verify_knowledge(self, project: str, knowledge_id: str, status: str, note: str | None = None):
+        def operation(request: PostgresRequestUnitOfWork):
+            return _knowledge_record_dict(request.evidence_service.set_knowledge_verification(
+                request.evidence_project("write"), knowledge_id, VerificationStatus(status),
+                checked_by=_authenticated_subject(), note=note
+            ))
+        return self._execute(project, "write", operation)
+
+    def verify_evidence(self, project: str, knowledge_id: str, evidence_id: str, status: str, note: str | None = None):
+        def operation(request: PostgresRequestUnitOfWork):
+            return _evidence_record_dict(request.evidence_service.set_evidence_verification(
+                request.evidence_project("write"), knowledge_id, evidence_id,
+                VerificationStatus(status), checked_by=_authenticated_subject(), note=note
+            ))
+        return self._execute(project, "write", operation)
+
+    def supersede_knowledge(self, project: str, previous_id: str, knowledge_type: str, claim: str, evidence_sources: list[dict[str, Any]]):
+        sources = _evidence_sources(evidence_sources)
+        def operation(request: PostgresRequestUnitOfWork):
+            return _knowledge_bundle_dict(request.evidence_service.supersede_knowledge(
+                request.evidence_project("write"), previous_id, KnowledgeType(knowledge_type), claim, sources
+            ))
+        return self._execute(project, "write", operation)
+
 
 @dataclass(frozen=True, slots=True)
 class _HandlerRuntime:
@@ -836,6 +908,7 @@ class HostedMCPToolHandlers:
     """Async HTTP wrappers that reuse local validation and public MCP schemas."""
 
     def __init__(self, services: HostedMCPServices) -> None:
+        self._services = services
         self._handlers = MCPToolHandlers(_HandlerRuntime(services, services))
 
     async def _call(self, handler, *args):
@@ -873,6 +946,74 @@ class HostedMCPToolHandlers:
 
     async def ping(self) -> str:
         return await self._call(self._handlers.ping)
+
+    async def create_knowledge(self, project: str, knowledge_type: str, claim: str, evidence_sources: list[dict[str, Any]]):
+        return await self._call(self._services.create_knowledge, project, knowledge_type, claim, evidence_sources)
+
+    async def get_knowledge(self, project: str, knowledge_id: str):
+        return await self._call(self._services.get_knowledge, project, knowledge_id)
+
+    async def associate_evidence(self, project: str, knowledge_id: str, evidence_source: dict[str, Any]):
+        return await self._call(self._services.associate_evidence, project, knowledge_id, evidence_source)
+
+    async def verify_knowledge(self, project: str, knowledge_id: str, status: str, note: str | None = None):
+        return await self._call(self._services.verify_knowledge, project, knowledge_id, status, note)
+
+    async def verify_evidence(self, project: str, knowledge_id: str, evidence_id: str, status: str, note: str | None = None):
+        return await self._call(self._services.verify_evidence, project, knowledge_id, evidence_id, status, note)
+
+    async def supersede_knowledge(self, project: str, previous_id: str, knowledge_type: str, claim: str, evidence_sources: list[dict[str, Any]]):
+        return await self._call(self._services.supersede_knowledge, project, previous_id, knowledge_type, claim, evidence_sources)
+
+
+def _register_hosted_evidence_tools(mcp: FastMCP, handlers: HostedMCPToolHandlers) -> None:
+    """Add authenticated hosted-only Evidence tools without changing stdio contracts."""
+    mcp.tool(description="Create project knowledge linked to existing evidence sources.")(handlers.create_knowledge)
+    mcp.tool(description="Read project knowledge and its linked evidence.")(handlers.get_knowledge)
+    mcp.tool(description="Link an existing evidence source to project knowledge.")(handlers.associate_evidence)
+    mcp.tool(description="Set project knowledge verification status.")(handlers.verify_knowledge)
+    mcp.tool(description="Set linked evidence verification status.")(handlers.verify_evidence)
+    mcp.tool(description="Supersede project knowledge with a linked successor.")(handlers.supersede_knowledge)
+
+
+def _evidence_sources(values: list[dict[str, Any]]) -> tuple[EvidenceSource, ...]:
+    if not isinstance(values, list) or not values:
+        raise _error("INVALID_ARGUMENT", "At least one evidence source is required.")
+    fields = {"evidence_type", "source_id", "locator", "revision", "content_hash"}
+    try:
+        result = []
+        for value in values:
+            if not isinstance(value, dict) or set(value) - fields or not {"evidence_type", "source_id"} <= set(value):
+                raise ValueError
+            result.append(EvidenceSource(
+                EvidenceType(value["evidence_type"]), value["source_id"],
+                value.get("locator"), value.get("revision"), value.get("content_hash"),
+            ))
+        return tuple(result)
+    except (TypeError, ValueError):
+        raise _error("INVALID_ARGUMENT", "Evidence source fields are invalid.") from None
+
+
+def _authenticated_subject() -> str:
+    token = _access_token.get()
+    claims = getattr(token, "claims", {}) if token is not None else {}
+    subject = claims.get("sub") if isinstance(claims, Mapping) else None
+    if not isinstance(subject, str) or not subject:
+        raise _error("ACCESS_DENIED", "Authenticated principal is unavailable.")
+    return subject
+
+
+def _knowledge_record_dict(record) -> dict[str, Any]:
+    return asdict(record)
+
+
+def _evidence_record_dict(record) -> dict[str, Any]:
+    return asdict(record)
+
+
+def _knowledge_bundle_dict(bundle) -> dict[str, Any]:
+    return {"record": _knowledge_record_dict(bundle.record),
+            "evidence": [_evidence_record_dict(item) for item in bundle.evidence]}
 
 
 class WorkspaceContextMiddleware:
@@ -966,6 +1107,7 @@ def create_hosted_mcp_server(
     )
     handlers = HostedMCPToolHandlers(services)
     register_mcp_tools(mcp, handlers)
+    _register_hosted_evidence_tools(mcp, handlers)
 
     async def healthz(_request: Request):
         return JSONResponse({"status": "ok"})
@@ -1844,6 +1986,11 @@ def _trigger_catalog_query() -> str:
           JOIN pg_catalog.pg_language AS language
             ON language.oid = procedure.prolang
          WHERE NOT catalog_trigger.tgisinternal
+           AND catalog_trigger.tgname NOT IN (
+               'celestin_workspace_active_owner_guard',
+               'celestin_membership_active_owner_guard',
+               'celestin_user_active_owner_guard'
+           )
            AND (
                (relation_namespace.nspname = 'public'
                 AND relation.relname = ANY(%s::text[]))
@@ -1946,6 +2093,89 @@ def _assert_expected_trigger_catalog(pool, timeout: float) -> None:
             except Exception:
                 raise RuntimeError("PostgreSQL authorization trigger cursor could not be closed") from None
     _validate_trigger_catalog(rows)
+
+
+def _assert_active_workspace_owner_guard(pool, timeout: float) -> None:
+    """Require the exact deferred owner invariant installed by migration 0011."""
+    query = """
+        SELECT relation.relname, trg.tgname, trg.tgenabled, trg.tgtype,
+               trg.tgconstraint <> 0, constraint_row.condeferrable,
+               constraint_row.condeferred, procedure.prosrc,
+               procedure.prosecdef, procedure.proconfig, language.lanname,
+               procedure.provolatile,
+               function_namespace.nspname,
+               owner.oid = (SELECT datdba FROM pg_catalog.pg_database
+                              WHERE datname = current_database()),
+               EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
+                   COALESCE(procedure.proacl, pg_catalog.acldefault('f', procedure.proowner))
+               ) acl WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'),
+               pg_catalog.has_function_privilege(current_user, procedure.oid, 'EXECUTE'),
+               EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
+                   COALESCE(procedure.proacl, pg_catalog.acldefault('f', procedure.proowner))
+               ) acl WHERE acl.grantee <> procedure.proowner)
+          FROM pg_catalog.pg_trigger AS trg
+          JOIN pg_catalog.pg_class relation ON relation.oid = trg.tgrelid
+          JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+          JOIN pg_catalog.pg_constraint constraint_row ON constraint_row.oid = trg.tgconstraint
+          JOIN pg_catalog.pg_proc procedure ON procedure.oid = trg.tgfoid
+          JOIN pg_catalog.pg_namespace function_namespace ON function_namespace.oid = procedure.pronamespace
+          JOIN pg_catalog.pg_language language ON language.oid = procedure.prolang
+          JOIN pg_catalog.pg_roles owner ON owner.oid = procedure.proowner
+         WHERE namespace.nspname = 'public' AND trg.tgname = ANY(%s::text[])
+         ORDER BY trg.tgname
+    """
+    names = (
+        "celestin_workspace_active_owner_guard",
+        "celestin_membership_active_owner_guard",
+        "celestin_user_active_owner_guard",
+    )
+    cursor = None
+    try:
+        with pool.connection(timeout=timeout) as connection:
+            cursor = connection.execute(query, (list(names),))
+            rows = cursor.fetchall()
+    except Exception:
+        raise RuntimeError("PostgreSQL active-owner invariant could not be verified") from None
+    finally:
+        if cursor is not None:
+            cursor.close()
+    expected = {
+        "celestin_workspace_active_owner_guard": ("celestin_workspaces", 29),
+        "celestin_membership_active_owner_guard": ("celestin_workspace_memberships", 29),
+        "celestin_user_active_owner_guard": ("celestin_users", 17),
+    }
+    try:
+        from orbit.postgres.migrations.runner import load_migrations
+        migration = next(item for item in load_migrations() if item.version == 11)
+        match = re.search(
+            r"CREATE FUNCTION public\.celestin_require_active_workspace_owner\(\).*?AS \$\$(.*?)\$\$;",
+            migration.sql, flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match is None:
+            raise ValueError
+        expected_source = _canonical_sql_expression(match.group(1))
+        if len(rows) != len(expected):
+            raise ValueError
+        for row in rows:
+            (table, name, enabled, event_mask, is_constraint, deferrable, deferred,
+             source, security_definer, config, language, volatility, function_schema,
+             database_owner, public_execute, current_execute, unexpected_execute) = row
+            expected_table, expected_event = expected[name]
+            if (
+                table != expected_table or enabled != "O" or event_mask != expected_event
+                or is_constraint is not True or deferrable is not True or deferred is not True
+                or _canonical_sql_expression(source) != expected_source
+                or security_definer is not True or tuple(config or ()) != ("search_path=pg_catalog, public",)
+                or language != "plpgsql" or volatility != "v" or function_schema != "public"
+                or database_owner is not True or public_execute is not False
+                or current_execute is not False or unexpected_execute is not False
+            ):
+                raise ValueError
+            expected.pop(name)
+        if expected:
+            raise ValueError
+    except Exception:
+        raise RuntimeError("PostgreSQL active-owner invariant is unsafe") from None
 
 
 def _assert_safe_authorization_reader(pool, timeout: float) -> None:
@@ -2175,6 +2405,7 @@ def _assert_safe_authorization_reader(pool, timeout: float) -> None:
         ),
     )
     _validate_authorization_reader_probe(row)
+    _assert_login_membership_options(pool, timeout, AUTHORIZATION_READER_ROLE)
     _assert_advisory_lock_privileges(
         pool, timeout, role_profile="authorization_reader"
     )
@@ -2223,6 +2454,7 @@ def _assert_safe_authorization_admin(pool, timeout: float) -> None:
         ),
     )
     _validate_authorization_admin_probe(row)
+    _assert_login_membership_options(pool, timeout, AUTHORIZATION_ADMIN_ROLE)
     _assert_advisory_lock_privileges(
         pool, timeout, role_profile="authorization_admin"
     )
@@ -2247,7 +2479,28 @@ def _privileged_role_membership_query() -> str:
                membership.admin_option,
                member.rolcanlogin, member.rolsuper, member.rolbypassrls,
                member.rolcreaterole, member.rolcreatedb,
-               member.rolreplication, member.rolinherit
+               member.rolreplication, member.rolinherit,
+               CASE
+                   WHEN membership.member IS NULL THEN NULL
+                   WHEN current_setting('server_version_num')::integer >= 160000
+                     THEN (pg_catalog.to_jsonb(membership)->>'inherit_option')::boolean
+                   ELSE member.rolinherit
+               END AS membership_inherit_option,
+               CASE
+                   WHEN membership.member IS NULL THEN NULL
+                   WHEN current_setting('server_version_num')::integer >= 160000
+                     THEN (pg_catalog.to_jsonb(membership)->>'set_option')::boolean
+                   ELSE TRUE
+               END AS membership_set_option,
+               CASE
+                   WHEN membership.member IS NULL THEN NULL
+                   WHEN current_setting('server_version_num')::integer < 160000 THEN TRUE
+                   ELSE COALESCE(
+                       (pg_catalog.to_jsonb(membership) ? 'inherit_option')
+                       AND (pg_catalog.to_jsonb(membership) ? 'set_option'),
+                       FALSE
+                   )
+               END AS membership_options_complete
           FROM pg_catalog.pg_roles AS group_role
           LEFT JOIN pg_catalog.pg_auth_members AS membership
             ON membership.roleid = group_role.oid
@@ -2259,7 +2512,7 @@ def _privileged_role_membership_query() -> str:
 
 
 def _validate_privileged_role_membership_catalog(rows, *, expected_members) -> None:
-    """Require safe NOLOGIN groups and the explicitly approved direct roster."""
+    """Require safe NOLOGIN groups and the exact direct-membership profile."""
     expected_groups = set(PRIVILEGED_GROUP_ROLES)
     try:
         materialized = [tuple(row) for row in rows]
@@ -2268,7 +2521,7 @@ def _validate_privileged_role_membership_catalog(rows, *, expected_members) -> N
         group_rows = {}
         actual_members = set()
         for row in materialized:
-            if len(row) != 18:
+            if len(row) != 21:
                 raise ValueError("unexpected role catalog row shape")
             (
                 group_name, group_can_login, group_superuser, group_bypassrls,
@@ -2276,7 +2529,8 @@ def _validate_privileged_role_membership_catalog(rows, *, expected_members) -> N
                 group_has_no_parent, member_name, admin_option,
                 member_can_login, member_superuser, member_bypassrls,
                 member_createrole, member_createdb, member_replication,
-                member_inherit,
+                member_inherit, membership_inherit_option,
+                membership_set_option, membership_options_complete,
             ) = row
             if any(type(row[index]) is not bool for index in range(1, 9)):
                 raise ValueError("privileged group catalog omitted a boolean property")
@@ -2296,15 +2550,19 @@ def _validate_privileged_role_membership_catalog(rows, *, expected_members) -> N
                 if any(value is not None for value in row[10:]):
                     raise ValueError("malformed empty role roster row")
                 continue
-            if any(type(row[index]) is not bool for index in range(10, 18)):
+            if any(type(row[index]) is not bool for index in range(10, 21)):
                 raise ValueError("privileged member catalog omitted a boolean property")
             member_profile = (
                 member_can_login, member_superuser, member_bypassrls,
                 member_createrole, member_createdb, member_replication,
                 member_inherit,
             )
-            if admin_option is not False or member_profile != (
-                True, False, False, False, False, False, True
+            if (
+                admin_option is not False
+                or member_profile != (True, False, False, False, False, False, True)
+                or membership_inherit_option is not True
+                or membership_set_option is not True
+                or membership_options_complete is not True
             ):
                 raise ValueError("unsafe privileged role member")
             actual_members.add((group_name, member_name))
@@ -2315,6 +2573,73 @@ def _validate_privileged_role_membership_catalog(rows, *, expected_members) -> N
         or actual_members != set(expected_members)
     ):
         raise RuntimeError("PostgreSQL privileged role membership catalog is unsafe")
+
+
+def _login_membership_options_query() -> str:
+    """Inspect the exact login-to-group edge without requiring PostgreSQL 16 columns."""
+    return """
+        /* celestin_login_membership_option_profile */
+        SELECT current_user = session_user AS exact_login,
+               login_role.rolinherit,
+               group_role.oid IS NOT NULL AND NOT group_role.rolcanlogin
+                   AS expected_group_is_no_login,
+               membership.member IS NOT NULL AS direct_membership_exists,
+               CASE
+                   WHEN current_setting('server_version_num')::integer >= 160000
+                     THEN (pg_catalog.to_jsonb(membership)->>'inherit_option')::boolean
+                   ELSE login_role.rolinherit
+               END AS membership_inherit_option,
+               CASE
+                   WHEN current_setting('server_version_num')::integer >= 160000
+                     THEN (pg_catalog.to_jsonb(membership)->>'set_option')::boolean
+                   ELSE TRUE
+               END AS membership_set_option,
+               membership.admin_option,
+               CASE
+                   WHEN current_setting('server_version_num')::integer < 160000 THEN TRUE
+                   ELSE COALESCE(
+                       (pg_catalog.to_jsonb(membership) ? 'inherit_option')
+                       AND (pg_catalog.to_jsonb(membership) ? 'set_option'),
+                       FALSE
+                   )
+               END AS membership_options_complete
+          FROM pg_catalog.pg_roles AS login_role
+          LEFT JOIN pg_catalog.pg_roles AS group_role
+            ON group_role.rolname = %s
+          LEFT JOIN pg_catalog.pg_auth_members AS membership
+            ON membership.roleid = group_role.oid
+           AND membership.member = login_role.oid
+         WHERE login_role.rolname = current_user
+    """
+
+
+def _validate_login_membership_options(row) -> None:
+    """Require inheritable membership in the one assigned group only.
+
+    SET ROLE remains allowed for that single assigned group, matching the
+    pre-16 PostgreSQL behavior and the existing sibling-role denial contract.
+    Other memberships are rejected by each login's role-readiness probe.
+    """
+    expected = (True, True, True, True, True, True, False, True)
+    if (
+        row is None
+        or len(row) != len(expected)
+        or any(type(value) is not bool for value in row)
+        or tuple(row) != expected
+    ):
+        raise RuntimeError("PostgreSQL login role membership options are unsafe")
+
+
+def _assert_login_membership_options(pool, timeout: float, expected_group: str) -> None:
+    try:
+        row = _run_pool_probe(
+            pool, timeout, _login_membership_options_query(), (expected_group,)
+        )
+    except Exception:
+        raise RuntimeError(
+            "PostgreSQL login role membership options could not be verified"
+        ) from None
+    _validate_login_membership_options(row)
 
 
 def _assert_safe_project_runtime(
@@ -2665,18 +2990,284 @@ def _assert_safe_project_runtime(
             UUID(int=scope[0].int ^ 1), scope[1],
             scope[0], UUID(int=scope[0].int ^ 1),
             auth_tables,
-            list(PROTECTED_TABLES[2:]) + ["celestin_schema_migrations"],
+            list(PROJECT_RUNTIME_UNEXPOSED_TABLES) + ["celestin_schema_migrations"],
             tenant_tables,
             list(PROTECTED_TABLES + AUTHORIZATION_TABLES + ("celestin_schema_migrations",)),
         ),
     )
     _validate_project_runtime_probe(row)
+    _assert_login_membership_options(pool, timeout, PROJECT_RUNTIME_ROLE)
+    _assert_evidence_runtime_privilege_profile(pool, timeout)
     _assert_advisory_lock_privileges(
         pool, timeout, role_profile="project_runtime"
     )
     _assert_expected_policy_catalog(pool, timeout)
     _assert_authorization_function_catalog(pool, timeout, project_runtime=True)
     _assert_expected_trigger_catalog(pool, timeout)
+    _assert_active_workspace_owner_guard(pool, timeout)
+
+
+def _evidence_runtime_privilege_catalog_query() -> str:
+    """Inspect effective Evidence access and the exact table/column ACLs."""
+    return """
+        /* celestin_evidence_runtime_privilege_catalog */
+        SELECT relation.relname,
+               relation.relowner::bigint,
+               owner_role.rolname,
+               runtime_role.oid::bigint,
+               runtime_role.rolname,
+               (
+                   runtime_role.oid IS NOT NULL
+                   AND reader_role.oid IS NOT NULL
+                   AND admin_role.oid IS NOT NULL
+                   AND owner_role.oid NOT IN (
+                       runtime_role.oid, reader_role.oid, admin_role.oid
+                   )
+                   AND NOT pg_catalog.pg_has_role(
+                       owner_role.oid, runtime_role.oid, 'MEMBER'
+                   )
+                   AND NOT pg_catalog.pg_has_role(
+                       owner_role.oid, reader_role.oid, 'MEMBER'
+                   )
+                   AND NOT pg_catalog.pg_has_role(
+                       owner_role.oid, admin_role.oid, 'MEMBER'
+                   )
+               ) AS owner_is_separate_from_hosted_runtime_roles,
+               login_role.oid::bigint,
+               login_role.rolname,
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'SELECT'),
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'INSERT'),
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'UPDATE'),
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'DELETE'),
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'TRUNCATE'),
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'TRIGGER'),
+               pg_catalog.has_table_privilege(current_user, relation.oid, 'REFERENCES'),
+               COALESCE((
+                   SELECT pg_catalog.jsonb_agg(
+                       pg_catalog.jsonb_build_object(
+                           'grantor_oid', acl.grantor::bigint,
+                           'grantor_name', pg_catalog.pg_get_userbyid(acl.grantor),
+                           'grantee_oid', acl.grantee::bigint,
+                           'grantee_name', CASE
+                               WHEN acl.grantee = 0 THEN 'PUBLIC'
+                               ELSE pg_catalog.pg_get_userbyid(acl.grantee)
+                           END,
+                           'privilege_type', acl.privilege_type,
+                           'is_grantable', acl.is_grantable
+                       ) ORDER BY acl.grantee, acl.grantor, acl.privilege_type
+                   )::text
+                     FROM pg_catalog.aclexplode(
+                         COALESCE(
+                             relation.relacl,
+                             pg_catalog.acldefault('r', relation.relowner)
+                         )
+                     ) AS acl
+               ), '[]') AS table_acl_entries,
+               EXISTS (
+                   SELECT 1
+                     FROM pg_catalog.pg_attribute AS attribute
+                    WHERE attribute.attrelid = relation.oid
+                      AND attribute.attnum > 0
+                      AND NOT attribute.attisdropped
+                      AND attribute.attacl IS NOT NULL
+               ) AS has_column_acl
+          FROM pg_catalog.pg_class AS relation
+          JOIN pg_catalog.pg_namespace AS namespace
+            ON namespace.oid = relation.relnamespace
+          JOIN pg_catalog.pg_roles AS owner_role
+            ON owner_role.oid = relation.relowner
+          JOIN pg_catalog.pg_roles AS login_role
+            ON login_role.rolname = current_user
+          LEFT JOIN pg_catalog.pg_roles AS runtime_role
+            ON runtime_role.rolname = %s
+          LEFT JOIN pg_catalog.pg_roles AS reader_role
+            ON reader_role.rolname = 'celestin_authorization_reader'
+          LEFT JOIN pg_catalog.pg_roles AS admin_role
+            ON admin_role.rolname = 'celestin_authorization_admin'
+         WHERE namespace.nspname = 'public'
+           AND relation.relname = ANY(%s::text[])
+           AND relation.relkind = 'r'
+         ORDER BY relation.relname
+    """
+
+
+def _assert_evidence_runtime_privilege_profile(pool, timeout: float) -> None:
+    """Require the reviewed Evidence table grants before hosted readiness."""
+    cursor = None
+    try:
+        with pool.connection(timeout=timeout) as connection:
+            cursor = connection.execute(
+                _evidence_runtime_privilege_catalog_query(),
+                (PROJECT_RUNTIME_ROLE, list(EVIDENCE_RUNTIME_TABLES)),
+            )
+            rows = cursor.fetchall()
+    except Exception:
+        raise RuntimeError(
+            "PostgreSQL Evidence table privileges could not be verified"
+        ) from None
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                raise RuntimeError(
+                    "PostgreSQL Evidence privilege cursor could not be closed"
+                ) from None
+    _validate_evidence_runtime_privilege_catalog(rows)
+
+
+def _validate_evidence_runtime_privilege_catalog(rows) -> None:
+    """Validate exact effective and ACL state for both Evidence tables.
+
+    The table owner retains its inherent ownership ACL. The only permitted
+    non-owner ACL is a non-grantable SELECT/INSERT/UPDATE grant to the existing
+    project-runtime group. Effective checks run as the exact project login.
+    """
+    expected_tables = set(EVIDENCE_RUNTIME_TABLES)
+    expected_runtime_privileges = {"SELECT", "INSERT", "UPDATE"}
+    owner_privileges = {
+        "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES",
+        "TRIGGER", "MAINTAIN",
+    }
+    owner_privilege_sets = (
+        set(),
+        owner_privileges - {"MAINTAIN"},
+        owner_privileges,
+    )
+    expected_effective = (True, True, True, False, False, False, False)
+    acl_fields = {
+        "grantor_oid", "grantor_name", "grantee_oid", "grantee_name",
+        "privilege_type", "is_grantable",
+    }
+    actual_tables = {}
+    owner_identity = None
+    try:
+        if not isinstance(rows, (list, tuple)):
+            raise ValueError("catalog rows are missing")
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) != 17:
+                raise ValueError("catalog row has an unexpected shape")
+            (
+                table_name,
+                owner_oid,
+                owner_name,
+                runtime_oid,
+                runtime_name,
+                owner_is_separate,
+                login_oid,
+                login_name,
+                *properties,
+            ) = row
+            if (
+                not isinstance(table_name, str)
+                or table_name not in expected_tables
+                or table_name in actual_tables
+                or type(owner_oid) is not int
+                or owner_oid <= 0
+                or not isinstance(owner_name, str)
+                or not owner_name
+                or type(runtime_oid) is not int
+                or runtime_oid <= 0
+                or runtime_name != PROJECT_RUNTIME_ROLE
+                or type(owner_is_separate) is not bool
+                or not owner_is_separate
+                or type(login_oid) is not int
+                or login_oid <= 0
+                or not isinstance(login_name, str)
+                or not login_name
+                or owner_oid in {runtime_oid, login_oid}
+                or runtime_oid == login_oid
+            ):
+                raise ValueError("catalog identity is missing or inconsistent")
+            effective = tuple(properties[:7])
+            acl_json, has_column_acl = properties[7:]
+            if (
+                len(properties) != 9
+                or any(type(value) is not bool for value in effective)
+                or effective != expected_effective
+                or type(has_column_acl) is not bool
+                or has_column_acl
+                or not isinstance(acl_json, str)
+            ):
+                raise ValueError("effective privileges or column ACLs are unsafe")
+
+            entries = json.loads(acl_json)
+            if not isinstance(entries, list):
+                raise ValueError("table ACL entries are missing")
+            seen_entries = set()
+            owner_entries = set()
+            runtime_entries = set()
+            for entry in entries:
+                if not isinstance(entry, Mapping) or set(entry) != acl_fields:
+                    raise ValueError("table ACL entry has an unexpected shape")
+                grantor_oid = entry["grantor_oid"]
+                grantor_name = entry["grantor_name"]
+                grantee_oid = entry["grantee_oid"]
+                grantee_name = entry["grantee_name"]
+                privilege = entry["privilege_type"]
+                grantable = entry["is_grantable"]
+                if (
+                    type(grantor_oid) is not int
+                    or grantor_oid <= 0
+                    or not isinstance(grantor_name, str)
+                    or not grantor_name
+                    or type(grantee_oid) is not int
+                    or grantee_oid < 0
+                    or not isinstance(grantee_name, str)
+                    or not grantee_name
+                    or privilege not in owner_privileges
+                    or type(grantable) is not bool
+                ):
+                    raise ValueError("table ACL metadata is incomplete")
+                key = (
+                    grantor_oid, grantor_name, grantee_oid, grantee_name,
+                    privilege, grantable,
+                )
+                if key in seen_entries:
+                    raise ValueError("duplicate table ACL entry")
+                seen_entries.add(key)
+
+                if grantee_oid == owner_oid:
+                    if (
+                        grantor_oid != owner_oid
+                        or grantor_name != owner_name
+                        or grantee_name != owner_name
+                        or not grantable
+                    ):
+                        raise ValueError("owner ACL identity is inconsistent")
+                    owner_entries.add(privilege)
+                elif grantee_oid == runtime_oid:
+                    if (
+                        grantor_oid != owner_oid
+                        or grantor_name != owner_name
+                        or grantee_name != runtime_name
+                        or privilege not in expected_runtime_privileges
+                        or grantable
+                    ):
+                        raise ValueError("project-runtime ACL grant is unsafe")
+                    runtime_entries.add(privilege)
+                else:
+                    # Rejects PUBLIC, direct login grants, auth roles, and all
+                    # unreviewed grantees regardless of effective access.
+                    raise ValueError("unexpected Evidence table grantee")
+
+            if (
+                owner_entries not in owner_privilege_sets
+                or runtime_entries != expected_runtime_privileges
+            ):
+                raise ValueError("Evidence table ACL does not match the exact profile")
+            actual_tables[table_name] = True
+            if owner_identity is None:
+                owner_identity = (owner_oid, owner_name)
+            elif owner_identity != (owner_oid, owner_name):
+                raise ValueError("Evidence table owners do not match")
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            "PostgreSQL Evidence table privilege profile is unsafe"
+        ) from None
+
+    if set(actual_tables) != expected_tables:
+        raise RuntimeError("PostgreSQL Evidence table privilege profile is unsafe")
 
 
 def _run_pool_probe(pool, timeout: float, query: str, params: tuple[Any, ...]):

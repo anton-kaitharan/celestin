@@ -3,13 +3,21 @@
 ## Status
 
 This document began as a storage-neutral domain and service prototype. The
-current `EvidenceLinkedMemoryStore` port has a request-bound PostgreSQL
-implementation in `src/orbit/evidence/postgres.py`, with schema in migrations
-`0005_evidence_linked_memory.sql` and `0006_candidate_revision_store.sql`.
-The adapter is exposed through `PostgresRequestUnitOfWork`; it is not wired to
-the SQLite MCP runtime, and there is no SQLite Evidence adapter. Its behavior
-has scripted coverage, but PostgreSQL migrations and adapter behavior have not
-yet been verified against a live server.
+current `EvidenceLinkedMemoryStore` port has a local SQLite implementation in
+`src/orbit/evidence/sqlite.py` using additive local schema migration 3, and a
+request-bound PostgreSQL implementation in `src/orbit/evidence/postgres.py`
+using migrations `0005_evidence_linked_memory.sql` and
+`0006_candidate_revision_store.sql`. The PostgreSQL adapter is exposed through
+`PostgresRequestUnitOfWork`. The local `build_runtime` composition constructs
+`EvidenceLinkedMemoryService` with `SQLiteEvidenceLinkedMemoryStore` and a
+project-scoped SQLite message resolver, sharing the configured local database
+path. This is an internal runtime service only: no MCP handler or public tool
+exposes Evidence/Knowledge operations. The resolver marks only existing,
+same-project `MESSAGE` references available; other supported model types stay
+unresolved until an authoritative local source lookup exists. Runtime and
+store-contract tests use temporary SQLite files. PostgreSQL tests remain
+scripted/offline, and migrations and adapter behavior have not been verified
+against a live server.
 
 The original `MemoryStore` message/decision port and its persistence behavior
 remain separate. The PostgreSQL Evidence adapter does not implement Capture
@@ -25,6 +33,12 @@ not be allowed to construct a service with a permissive authorizer or choose
 its principal. No Resurrection Layer operation is currently exposed through
 MCP. Hosted integration must supply the trusted principal and authorizer at
 the application boundary and continue checking membership on every request.
+The local SQLite message resolver uses a single query constrained by both
+project and message ID, so a missing and a foreign-project message have the
+same `MISSING` result. Source resolution and the subsequent Evidence write use
+separate short-lived SQLite connections; source deletion can race after the
+availability check, and the persisted status is not a durable source lock or
+proof of truth. Only `MESSAGE` is currently resolvable in local runtime.
 
 ## Domain records
 
@@ -104,8 +118,11 @@ optional value must reject/flag the conversion instead of silently dropping it.
 The existing PostgreSQL adapter maps this port to the schema in migration
 `0005_evidence_linked_memory.sql` and uses workspace/project scope from the
 authorized request unit of work. It has not yet been exercised against a live
-PostgreSQL server; schema/runtime behavior therefore remains unverified. There
-is no SQLite implementation of this port. The existing decision
+PostgreSQL server; schema/runtime behavior therefore remains unverified. The
+local SQLite implementation maps the same current port to additive schema
+migration 3 and owns a short `BEGIN IMMEDIATE` transaction for each write. It
+does not establish authenticated identity or wire the Evidence service into an
+MCP handler. The existing decision
 `source_message_id` remains a legacy one-source link and cannot represent
 multiple sources, independent verification, or supersession history. Reusing
 decision upsert behavior would overwrite history and is not suitable.
@@ -119,13 +136,14 @@ cannot be fully composed for source types lacking an authorized resolver.
 
 ## Original prototype non-goals
 
-The following boundaries remain in effect; the original statement that no
-PostgreSQL Evidence adapter or schema exists has been superseded by migration
-0005 and the request-bound adapter. Migration 0006 also adds candidate/revision
-storage structures, but does not add Capture conversion:
+The following boundaries remain in effect; the original statements that no
+PostgreSQL Evidence adapter/schema existed have been superseded by migration
+0005 and the request-bound adapter, and the original statement that no local
+SQLite adapter existed has been superseded by migration 3. Migration 0006 also
+adds candidate/revision storage structures, but does not add Capture
+conversion:
 
-- No SQLite Evidence adapter, Capture conversion, producer delivery receipts,
-  or retry arbitration.
+- No Capture conversion, producer delivery receipts, or retry arbitration.
 - No automatic source scanning, source-content copying, or claim extraction.
 - No automatic conflict resolution, freshness inference, or decision approval.
 - No new MCP tool and no change to existing retrieval contracts.

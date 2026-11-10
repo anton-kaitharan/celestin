@@ -1,5 +1,11 @@
 # Celestin — Public MCP Tool Contracts
 
+## Hosted Evidence tools
+
+Hosted HTTPS MCP additionally exposes `create_knowledge`, `get_knowledge`, `associate_evidence`, `verify_knowledge`, `verify_evidence`, and `supersede_knowledge`. These are additive hosted capabilities; the local stdio/SQLite tool set and its schemas remain unchanged. Each call requires the matching `memory:read` or `memory:write` API scope, explicit workspace selection, active project membership, and the project-scoped PostgreSQL request unit of work. Evidence source references and all reads/writes are constrained to that authorized project. Verification actor labels are taken from the verified token subject, never caller input.
+
+Arguments reuse the Evidence domain types: `knowledge_type` is a `KnowledgeType` value; `evidence_sources` contains `{evidence_type, source_id, locator?, revision?, content_hash?}` entries; verification `status` is a `VerificationStatus` value. `get_knowledge` returns `{record, evidence}`; record/evidence results serialize the existing Evidence dataclasses. `create_knowledge`, `associate_evidence`, verification, and supersession return their corresponding existing domain result. Unknown or cross-project identifiers are reported as unavailable within the authorized project. These tools do not implement archival, purge, or retention.
+
 **Status:** MCP boundary contract. This document defines public tool arguments and response schemas; database and retrieval implementation details are documented in `docs/retrieval_integration.md` and `docs/retrieval.md`.
 
 ## Ownership and compatibility

@@ -173,6 +173,88 @@ SCHEMA_MIGRATIONS: dict[int, tuple[str, ...]] = {
     FROM project_memory
     """,
     ),
+    3: (
+        """
+        CREATE TABLE IF NOT EXISTS celestin_knowledge_records (
+            project TEXT NOT NULL CHECK (length(trim(project)) > 0),
+            knowledge_id TEXT NOT NULL CHECK (length(trim(knowledge_id)) > 0),
+            knowledge_type TEXT NOT NULL CHECK (knowledge_type IN (
+                'decision', 'discovery', 'bug_fix', 'implementation_finding',
+                'completed_work', 'requirement', 'open_question'
+            )),
+            claim TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            verification_status TEXT NOT NULL CHECK (verification_status IN (
+                'unverified', 'verified', 'stale', 'conflicting'
+            )),
+            lifecycle_status TEXT NOT NULL CHECK (lifecycle_status IN (
+                'current', 'superseded', 'archived'
+            )),
+            supersedes_id TEXT,
+            superseded_by_id TEXT,
+            checked_at TEXT,
+            checked_by TEXT,
+            check_note TEXT,
+            capture_provenance TEXT,
+            PRIMARY KEY (project, knowledge_id),
+            FOREIGN KEY (project, supersedes_id)
+                REFERENCES celestin_knowledge_records(project, knowledge_id)
+                ON DELETE RESTRICT,
+            FOREIGN KEY (project, superseded_by_id)
+                REFERENCES celestin_knowledge_records(project, knowledge_id)
+                ON DELETE RESTRICT,
+            CHECK (supersedes_id IS NULL OR supersedes_id <> knowledge_id),
+            CHECK (superseded_by_id IS NULL OR superseded_by_id <> knowledge_id),
+            CHECK (lifecycle_status <> 'superseded' OR superseded_by_id IS NOT NULL),
+            CHECK (lifecycle_status <> 'current' OR superseded_by_id IS NULL)
+        )
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_celestin_knowledge_one_successor
+            ON celestin_knowledge_records (project, supersedes_id)
+            WHERE supersedes_id IS NOT NULL
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_celestin_knowledge_project_lifecycle
+            ON celestin_knowledge_records (project, lifecycle_status)
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS celestin_evidence_records (
+            project TEXT NOT NULL CHECK (length(trim(project)) > 0),
+            knowledge_id TEXT NOT NULL,
+            evidence_id TEXT NOT NULL CHECK (length(trim(evidence_id)) > 0),
+            evidence_position INTEGER NOT NULL CHECK (evidence_position >= 0),
+            evidence_type TEXT NOT NULL CHECK (evidence_type IN (
+                'message', 'repository_file', 'git_commit', 'test_result', 'document', 'other'
+            )),
+            source_id TEXT NOT NULL CHECK (length(trim(source_id)) > 0),
+            locator TEXT,
+            revision TEXT,
+            content_hash TEXT,
+            captured_at TEXT NOT NULL,
+            reference_status TEXT NOT NULL CHECK (reference_status IN (
+                'available', 'unresolved', 'missing'
+            )),
+            verification_status TEXT NOT NULL CHECK (verification_status IN (
+                'unverified', 'verified', 'stale', 'conflicting'
+            )),
+            checked_at TEXT,
+            checked_by TEXT,
+            check_note TEXT,
+            PRIMARY KEY (project, evidence_id),
+            UNIQUE (project, knowledge_id, evidence_id),
+            UNIQUE (project, knowledge_id, evidence_position),
+            FOREIGN KEY (project, knowledge_id)
+                REFERENCES celestin_knowledge_records(project, knowledge_id)
+                ON DELETE RESTRICT
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_celestin_evidence_project_knowledge
+            ON celestin_evidence_records (project, knowledge_id, evidence_position)
+        """,
+    ),
 }
 
 _ROLE_VALUES = ("user", "assistant", "system")

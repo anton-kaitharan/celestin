@@ -156,6 +156,7 @@ class EvidenceLinkedMemoryStoreContract:
         successor, successor_evidence = _knowledge_and_evidence(
             "project-a", "successor"
         )
+        successor = replace(successor, supersedes_id=previous.knowledge_id)
         store.create_knowledge(previous, previous_evidence)
         self.arm_failure_after_staging(store, "supersede")
 

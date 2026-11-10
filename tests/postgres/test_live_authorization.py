@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from orbit.evidence.model import EvidenceSource, EvidenceType, KnowledgeType, ReferenceStatus
 from orbit.mcp_server.hosted_scope import (
     HostedAccessDenied,
     HostedAuthorizationUnavailable,
@@ -33,11 +34,13 @@ from orbit.mcp_server.hosted_server import (
     _assert_expected_policy_catalog,
     _assert_expected_trigger_catalog,
     _assert_safe_authorization_admin,
+    _assert_evidence_runtime_privilege_profile,
     _assert_safe_project_runtime,
     _create_pool,
     _privileged_role_membership_query,
     _validate_advisory_lock_privilege_catalog,
     _validate_privileged_role_membership_catalog,
+    EVIDENCE_RUNTIME_TABLES,
 )
 
 
@@ -173,7 +176,7 @@ def tenant_fixture(postgres_connections):
             connection.execute(
                 """INSERT INTO celestin_workspace_memberships
                        (workspace_id, user_id, role, status)
-                   VALUES (%s, %s, 'member', 'active')""",
+                   VALUES (%s, %s, 'owner', 'active')""",
                 (workspace_id, ids["human_id"]),
             )
         connection.execute(
@@ -703,6 +706,38 @@ def test_project_runtime_retrieval_uses_scoped_request_uow_and_authoritative_row
     assert records[str(fixture.message_a)].content == match.content
 
 
+def test_project_runtime_evidence_service_uses_authorized_request_uow(
+    postgres_connections, tenant_fixture
+):
+    pg, fixture = postgres_connections, tenant_fixture
+    factory = _factory(pg)
+    def create_and_read(request):
+        connection = request.evidence_store._connection
+        assert connection is request._authorization_session._connection_for_adapters
+        assert connection.info.transaction_status == pg.psycopg.pq.TransactionStatus.INTRANS
+        bundle = request.evidence_service.create_knowledge(
+            request.evidence_project("write"),
+            KnowledgeType.DISCOVERY,
+            "Hosted Evidence is request scoped.",
+            (EvidenceSource(EvidenceType.MESSAGE, str(fixture.message_a)),),
+        )
+        readback = request.evidence_service.get_knowledge(
+            request.evidence_project("read"),
+            bundle.record.knowledge_id,
+        )
+        return bundle, readback
+
+    bundle = factory._execute_authorized_request(
+        fixture.resolver(), fixture.human(), fixture.project_key, "write",
+        lambda request: create_and_read(request),
+    )
+    created, readback = bundle
+    assert created.record.knowledge_id
+    assert readback.record == created.record
+    assert readback.evidence == created.evidence
+    assert created.evidence[0].reference_status is ReferenceStatus.AVAILABLE
+
+
 @pytest.mark.parametrize(
     "own_workspace_attr,own_project_attr,other_workspace_attr,other_project_attr,role",
     [
@@ -887,6 +922,49 @@ def test_project_login_cannot_lock_an_unmapped_workspace(postgres_connections, t
                 )
 
 
+def test_missing_project_scope_mapping_denies_content_reads_and_writes(
+    postgres_connections, tenant_fixture
+):
+    pg, fixture = postgres_connections, tenant_fixture
+    login = pg.target.project_a_user
+    with pg.connection() as connection, connection.transaction():
+        removed = connection.execute(
+            "DELETE FROM celestin_private.project_runtime_scopes "
+            "WHERE login_role_name = %s RETURNING login_role_name, workspace_id, project_id",
+            (login,),
+        ).fetchone()
+    assert removed == (login, fixture.workspace_a, fixture.project_a)
+    try:
+        with pg.project_connection(fixture.workspace_a, fixture.project_a) as connection:
+            with connection.transaction():
+                assert connection.execute("SELECT count(*) FROM chat_messages").fetchone()[0] == 0
+                assert connection.execute("SELECT count(*) FROM project_memory").fetchone()[0] == 0
+                with pytest.raises(pg.psycopg.errors.InsufficientPrivilege):
+                    with connection.transaction():
+                        connection.execute(
+                            """INSERT INTO chat_messages
+                                   (workspace_id, project_id, conversation_id, role, content, created_at)
+                               VALUES (%s, %s, %s, 'user', 'missing scope', CURRENT_TIMESTAMP)""",
+                            (fixture.workspace_a, fixture.project_a, f"missing-{fixture.suffix}"),
+                        )
+                updated = connection.execute(
+                    "UPDATE project_memory SET value = 'missing-scope-write' WHERE id = %s",
+                    (fixture.memory_a,),
+                )
+                assert updated.rowcount == 0
+                with pytest.raises(pg.psycopg.errors.InsufficientPrivilege):
+                    connection.execute(
+                        "DELETE FROM chat_messages WHERE id = %s", (fixture.message_a,)
+                    )
+    finally:
+        with pg.connection() as connection, connection.transaction():
+            connection.execute(
+                "INSERT INTO celestin_private.project_runtime_scopes "
+                "(login_role_name, workspace_id, project_id) VALUES (%s, %s, %s)",
+                removed,
+            )
+
+
 @pytest.mark.parametrize("role", ["project_a", "project_b"])
 def test_project_runtime_live_policy_and_trigger_catalogs_cover_all_protected_tables(
     postgres_connections, tenant_fixture, role
@@ -899,6 +977,7 @@ def test_project_runtime_live_policy_and_trigger_catalogs_cover_all_protected_ta
     assert len(PROTECTED_TABLES) == 12
     _assert_expected_policy_catalog(pool, timeout=5)
     _assert_expected_trigger_catalog(pool, timeout=5)
+    _assert_evidence_runtime_privilege_profile(pool, timeout=5)
 
     with pg.project_connection(workspace_id, project_id) as connection:
         privileges = connection.execute(
@@ -906,18 +985,106 @@ def test_project_runtime_live_policy_and_trigger_catalogs_cover_all_protected_ta
                       has_table_privilege(current_user, format('public.%I', table_name), 'SELECT'),
                       has_table_privilege(current_user, format('public.%I', table_name), 'INSERT'),
                       has_table_privilege(current_user, format('public.%I', table_name), 'UPDATE'),
-                      has_table_privilege(current_user, format('public.%I', table_name), 'DELETE')
+                      has_table_privilege(current_user, format('public.%I', table_name), 'DELETE'),
+                      has_table_privilege(current_user, format('public.%I', table_name), 'TRUNCATE'),
+                      has_table_privilege(current_user, format('public.%I', table_name), 'TRIGGER'),
+                      has_table_privilege(current_user, format('public.%I', table_name), 'REFERENCES')
                  FROM unnest(%s::text[]) AS tables(table_name)
                 ORDER BY table_name""",
             (list(PROTECTED_TABLES),),
         ).fetchall()
+    readable_tables = {"chat_messages", "project_memory", *EVIDENCE_RUNTIME_TABLES}
+    writable_tables = {"chat_messages", "project_memory", *EVIDENCE_RUNTIME_TABLES}
+    updatable_tables = {"project_memory", *EVIDENCE_RUNTIME_TABLES}
     expected = {
-        table: (table in {"chat_messages", "project_memory"},
-                table in {"chat_messages", "project_memory"},
-                table == "project_memory", False)
+        table: (
+            table in readable_tables,
+            table in writable_tables,
+            table in updatable_tables,
+            False,
+            False,
+            False,
+            False,
+        )
         for table in PROTECTED_TABLES
     }
     assert {table: tuple(row[1:]) for row in privileges} == expected
+
+    knowledge_id = f"runtime-evidence-profile-{fixture.suffix}"
+    evidence_id = f"runtime-evidence-profile-{fixture.suffix}"
+    scopes = (
+        (fixture.workspace_a, fixture.project_a),
+        (fixture.workspace_b, fixture.project_b),
+    )
+    for scoped_workspace, scoped_project in scopes:
+        with pg.project_connection(scoped_workspace, scoped_project) as connection:
+            with connection.transaction():
+                connection.execute(
+                    """INSERT INTO celestin_knowledge_records
+                           (workspace_id, project_id, knowledge_id, knowledge_type, claim,
+                            created_at, updated_at, verification_status, lifecycle_status)
+                       VALUES (%s, %s, %s, 'decision', 'synthetic ACL scope fixture',
+                               CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'unverified', 'current')""",
+                    (scoped_workspace, scoped_project, knowledge_id),
+                )
+                connection.execute(
+                    """INSERT INTO celestin_evidence_records
+                           (workspace_id, project_id, knowledge_id, evidence_id,
+                            evidence_position, evidence_type, source_id, captured_at,
+                            reference_status, verification_status)
+                       VALUES (%s, %s, %s, %s, 0, 'other', 'synthetic-scope-fixture',
+                               CURRENT_TIMESTAMP, 'unresolved', 'unverified')""",
+                    (scoped_workspace, scoped_project, knowledge_id, evidence_id),
+                )
+
+    for scoped_workspace, scoped_project in scopes:
+        with pg.project_connection(scoped_workspace, scoped_project) as connection:
+            with connection.transaction():
+                assert connection.execute(
+                    """SELECT workspace_id, project_id FROM celestin_knowledge_records
+                         WHERE knowledge_id = %s""",
+                    (knowledge_id,),
+                ).fetchall() == [(scoped_workspace, scoped_project)]
+                assert connection.execute(
+                    """SELECT workspace_id, project_id FROM celestin_evidence_records
+                         WHERE evidence_id = %s""",
+                    (evidence_id,),
+                ).fetchall() == [(scoped_workspace, scoped_project)]
+
+    for own_workspace, own_project, foreign_workspace, foreign_project in (
+        (fixture.workspace_a, fixture.project_a, fixture.workspace_b, fixture.project_b),
+        (fixture.workspace_b, fixture.project_b, fixture.workspace_a, fixture.project_a),
+    ):
+        _expect_sqlstate(
+            pg,
+            """INSERT INTO celestin_knowledge_records
+                   (workspace_id, project_id, knowledge_id, knowledge_type, claim,
+                    created_at, updated_at, verification_status, lifecycle_status)
+               VALUES (%s, %s, %s, 'decision', 'cross-scope insert must fail',
+                       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'unverified', 'current')""",
+            (foreign_workspace, foreign_project, f"forbidden-{fixture.suffix}-{own_project}"),
+            "42501",
+            workspace_id=own_workspace,
+            project_id=own_project,
+        )
+        _expect_sqlstate(
+            pg,
+            """INSERT INTO celestin_evidence_records
+                   (workspace_id, project_id, knowledge_id, evidence_id,
+                    evidence_position, evidence_type, source_id, captured_at,
+                    reference_status, verification_status)
+               VALUES (%s, %s, %s, %s, 1, 'other', 'foreign-scope-fixture',
+                       CURRENT_TIMESTAMP, 'unresolved', 'unverified')""",
+            (
+                foreign_workspace,
+                foreign_project,
+                knowledge_id,
+                f"forbidden-evidence-{fixture.suffix}-{own_project}",
+            ),
+            "42501",
+            workspace_id=own_workspace,
+            project_id=own_project,
+        )
 
 
 @pytest.mark.parametrize("role", ["project_a", "project_b"])
@@ -1168,21 +1335,101 @@ def test_archive_and_purge_checks_reject_invalid_timestamps(postgres_connections
             _expect_sqlstate(pg, statement, params, "23514")
 
 
-def test_workspace_can_be_created_without_an_active_owner(postgres_connections, tenant_fixture):
-    """The current schema accepts this state; the invariant needs app-level enforcement."""
+def test_workspace_commit_requires_an_active_owner(postgres_connections, tenant_fixture):
     pg, fixture = postgres_connections, tenant_fixture
     workspace_id = uuid4()
     with pg.connection() as connection, connection.transaction():
+        with pytest.raises(pg.psycopg.Error) as raised:
+            with connection.transaction():
+                connection.execute(
+                    "INSERT INTO celestin_workspaces (id, slug, name) VALUES (%s, %s, %s)",
+                    (workspace_id, f"ownerless-{fixture.suffix}", "Synthetic ownerless-policy probe"),
+                )
+                connection.execute(
+                    "SET CONSTRAINTS celestin_workspace_active_owner_guard IMMEDIATE"
+                )
+        assert raised.value.sqlstate == "23514"
+
+
+@pytest.mark.parametrize(
+    ("table", "trigger", "assignment", "identity_column"),
+    (
+        ("celestin_workspace_memberships", "celestin_membership_active_owner_guard",
+         "role = 'member'", "user_id"),
+        ("celestin_workspace_memberships", "celestin_membership_active_owner_guard",
+         "status = 'suspended'", "user_id"),
+    ),
+)
+def test_last_active_owner_cannot_be_demoted_or_suspended(
+    postgres_connections, tenant_fixture, table, trigger, assignment, identity_column
+):
+    pg, fixture = postgres_connections, tenant_fixture
+    user_id = fixture.human_id
+    with pg.connection() as connection, connection.transaction():
+        with pytest.raises(pg.psycopg.Error) as raised:
+            with connection.transaction():
+                connection.execute(
+                    f"UPDATE {table} SET {assignment} "
+                    f"WHERE workspace_id = %s AND {identity_column} = %s",
+                    (fixture.workspace_a, user_id),
+                )
+                connection.execute(f"SET CONSTRAINTS {trigger} IMMEDIATE")
+        assert raised.value.sqlstate == "23514"
+
+
+def test_last_active_owner_identity_cannot_be_suspended(postgres_connections, tenant_fixture):
+    pg, fixture = postgres_connections, tenant_fixture
+    with pg.connection() as connection, connection.transaction():
+        with pytest.raises(pg.psycopg.Error) as raised:
+            with connection.transaction():
+                connection.execute(
+                    "UPDATE celestin_users SET status = 'suspended' WHERE id = %s",
+                    (fixture.human_id,),
+                )
+                connection.execute("SET CONSTRAINTS celestin_user_active_owner_guard IMMEDIATE")
+        assert raised.value.sqlstate == "23514"
+
+
+def test_concurrent_owner_suspensions_preserve_one_active_owner(postgres_connections, tenant_fixture):
+    pg, fixture = postgres_connections, tenant_fixture
+    with pg.connection() as connection, connection.transaction():
         connection.execute(
-            "INSERT INTO celestin_workspaces (id, slug, name) VALUES (%s, %s, %s)",
-            (workspace_id, f"ownerless-{fixture.suffix}", "Synthetic ownerless-policy probe"),
+            "UPDATE celestin_workspace_memberships SET role = 'owner' "
+            "WHERE workspace_id = %s AND user_id = %s",
+            (fixture.workspace_a, fixture.contender_user_id),
         )
-        assert connection.execute(
-            """SELECT count(*) FROM celestin_workspace_memberships
-                 WHERE workspace_id = %s AND role = 'owner' AND status = 'active'""",
-            (workspace_id,),
-        ).fetchone()[0] == 0
-        connection.execute("DELETE FROM celestin_workspaces WHERE id = %s", (workspace_id,))
+
+    start = Event()
+
+    def suspend(user_id):
+        start.wait(_LOCK_WAIT_SECONDS)
+        try:
+            with pg.connection() as connection, connection.transaction():
+                connection.execute(
+                    "UPDATE celestin_workspace_memberships SET status = 'suspended' "
+                    "WHERE workspace_id = %s AND user_id = %s",
+                    (fixture.workspace_a, user_id),
+                )
+            return None
+        except pg.psycopg.Error as exc:
+            return exc.sqlstate
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        owner_a = executor.submit(suspend, fixture.human_id)
+        owner_b = executor.submit(suspend, fixture.contender_user_id)
+        start.set()
+        outcomes = (owner_a.result(timeout=_LOCK_WAIT_SECONDS), owner_b.result(timeout=_LOCK_WAIT_SECONDS))
+
+    assert sorted(outcomes, key=lambda value: value or "") == [None, "23514"]
+    active_owners = _fetchone(
+        pg,
+        """SELECT count(*) FROM celestin_workspace_memberships AS membership
+             JOIN celestin_users AS identity ON identity.id = membership.user_id
+            WHERE membership.workspace_id = %s AND membership.role = 'owner'
+              AND membership.status = 'active' AND identity.status = 'active'""",
+        (fixture.workspace_a,),
+    )[0]
+    assert active_owners == 1
 
 
 def test_authorized_write_commits_and_failed_operation_rolls_back(postgres_connections, tenant_fixture):
